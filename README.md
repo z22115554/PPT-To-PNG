@@ -13,7 +13,7 @@
 | 檔案 | 說明 |
 |---|---|
 | `PPT-PNG-Exporter-1.1.1-Setup.exe` | 安裝版，會建立開始功能表捷徑與右鍵選單 |
-| `PPT-PNG-Exporter-1.1.1-Portable-win-x64.zip` | 免安裝版，解壓縮就能用 |
+| `PPT-PNG-Exporter-1.1.1-Portable-win-x64.exe` | 免安裝版，下載後直接雙擊執行 |
 
 兩種都自帶 .NET 執行階段，不需要另外安裝。
 
@@ -25,10 +25,9 @@
 
 ### 免安裝版
 
-1. 解壓縮 `PPT-PNG-Exporter-1.1.1-Portable-win-x64.zip` 到任何位置。
-2. 雙擊 **PPT PNG 匯出工具.exe**。
+下載 `PPT-PNG-Exporter-1.1.1-Portable-win-x64.exe`，放到任何位置後雙擊執行。
 
-不需要安裝 .NET，不需要系統管理員權限。
+不需要解壓縮，不需要安裝 .NET，不需要系統管理員權限。整個程式（含 .NET 執行階段）就是這一個檔案，第一次啟動會自我解壓到暫存資料夾，因此會比安裝版慢幾秒。
 
 ### 安裝版
 
