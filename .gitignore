@@ -1,0 +1,20 @@
+# 建置輸出
+bin/
+obj/
+artifacts/
+*.user
+*.suo
+
+# Visual Studio / Rider
+.vs/
+.idea/
+*.DotSettings.user
+
+# 測試結果
+TestResults/
+*.trx
+*.coverage
+
+# 作業系統
+Thumbs.db
+.DS_Store

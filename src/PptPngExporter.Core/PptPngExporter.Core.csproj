@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>PptPngExporter.Core</RootNamespace>
+    <AssemblyName>PptPngExporter.Core</AssemblyName>
+    <!-- COM 晚期繫結（PowerPoint 自動化）需要內建 COM Interop -->
+    <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
+    <EnableComHosting>false</EnableComHosting>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Win32.Registry" Version="5.0.0" />
+    <PackageReference Include="PDFtoImage" Version="5.2.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="PptPngExporter.Tests" />
+  </ItemGroup>
+
+</Project>

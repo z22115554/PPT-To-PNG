@@ -1,0 +1,15 @@
+<Project>
+  <PropertyGroup>
+    <LangVersion>12.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <Product>PPT PNG 匯出工具</Product>
+    <Company>PPT PNG Exporter</Company>
+    <Version>1.1.1</Version>
+    <NeutralLanguage>zh-TW</NeutralLanguage>
+    <!-- 允許在非 Windows 平台（例如 CI 容器）建置 WPF 專案 -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+  </PropertyGroup>
+</Project>

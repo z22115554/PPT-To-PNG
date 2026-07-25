@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <!-- 只為了資料夾選取對話方塊 -->
+    <UseWindowsForms>true</UseWindowsForms>
+    <RootNamespace>PptPngExporter.App</RootNamespace>
+    <AssemblyName>PPT PNG 匯出工具</AssemblyName>
+    <ApplicationIcon>Resources\app.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
+    <SatelliteResourceLanguages>zh-Hant</SatelliteResourceLanguages>
+    <AssemblyTitle>PPT PNG 匯出工具</AssemblyTitle>
+    <Description>批次把 PowerPoint 簡報的每一頁轉存為高畫質 PNG 圖片。</Description>
+    <!-- WFAC010 是 WinForms 分析器的建議；本專案是 WPF，DPI 設定就該放在資訊清單裡 -->
+    <NoWarn>$(NoWarn);WFAC010</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 只用 WinForms 的資料夾選取對話方塊；移除它的隱含 using，避免與 WPF 型別同名衝突 -->
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\PptPngExporter.Core\PptPngExporter.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="Resources\app.ico">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>

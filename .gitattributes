@@ -1,0 +1,12 @@
+# 預設由 Git 自行判斷，並在簽出時使用平台原生換行
+* text=auto
+
+# 建置腳本固定 CRLF：Windows PowerShell 5.1 / cmd.exe / Inno Setup 只在 Windows 執行
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.iss text eol=crlf
+
+# 二進位檔不要做任何換行轉換
+*.pptx binary
+*.ico  binary
+*.png  binary
