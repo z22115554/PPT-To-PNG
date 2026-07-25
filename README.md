@@ -439,3 +439,21 @@ Write-Ok "$($_.FullName)嚗?([math]::Round(...
 ```
 
 四個檔案均已加上 UTF-8 BOM 並統一為 CRLF。`.bat` 維持不含 BOM（cmd.exe 會把 BOM 當成指令的一部分）。新增 `BuildScriptEncodingTests` 自動驗證這些規則，避免日後編輯時再次發生。
+
+另修正 `publish-portable.ps1` 組裝 `dotnet publish` 參數的錯誤。原本寫成：
+
+```powershell
+$publishArgs = @(
+    ...
+    '-p:PublishSingleFile=' + $SingleFile.ToString().ToLower(),
+    ...
+)
+```
+
+在陣列常值中，PowerShell 的逗號運算子優先順序**高於** `+`，因此上式被解讀成「前面那段陣列 **+** 一個元素」，實際產生 `-p:PublishSingleFile=` 與 `true` 兩個獨立參數。MSBuild 收到多出來的 `true` 當成第二個專案路徑，回報：
+
+```
+MSBUILD : error MSB1008: 只能指定一個專案。
+```
+
+已改用字串內插 `"-p:PublishSingleFile=$($SingleFile.ToString().ToLower())"`。

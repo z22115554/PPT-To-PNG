@@ -58,7 +58,10 @@ $publishArgs = @(
     '--self-contained', 'true',
     '-o', $stageDir,
     '--nologo',
-    '-p:PublishSingleFile=' + $SingleFile.ToString().ToLower(),
+    # 必須用字串內插。在陣列常值中，逗號的優先順序高於 +，
+    # 寫成 '-p:PublishSingleFile=' + $x 會被解讀成「陣列 + 元素」，
+    # 結果是 '-p:PublishSingleFile=' 與 'true' 兩個獨立參數，MSBuild 會回報 MSB1008。
+    "-p:PublishSingleFile=$($SingleFile.ToString().ToLower())",
     '-p:IncludeNativeLibrariesForSelfExtract=true',
     '-p:EnableCompressionInSingleFile=true',
     '-p:DebugType=none',
