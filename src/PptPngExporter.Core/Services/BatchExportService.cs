@@ -62,6 +62,19 @@ public sealed class BatchExportService
         LongPath.EnsureDirectory(options.OutputRoot);
         SweepStaleStaging(options.OutputRoot);
 
+        // 空間已經少到放不下任何東西時直接說清楚，不要讓每個檔案各自撞上寫入失敗
+        var spaceNote = DiskSpace.Check(options.OutputRoot, out var spaceBlocks);
+        if (spaceNote is not null) _logger.Warn(spaceNote);
+        if (spaceBlocks)
+        {
+            foreach (var r in results)
+            {
+                r.Status = ExportStatus.Failed;
+                r.ErrorMessage = spaceNote;
+            }
+            return new BatchExportReport { Results = results, OutputRoot = options.OutputRoot, WasCancelled = false };
+        }
+
         var hasPowerPoint = _converters.Any(c => c.Engine == ConversionEngine.PowerPoint && c.IsAvailable());
         var hasLibreOffice = _converters.Any(c => c.Engine == ConversionEngine.LibreOffice && c.IsAvailable());
         var blocker = EngineAvailability.DescribeBlocker(options.Engine, hasPowerPoint, hasLibreOffice);
@@ -81,6 +94,57 @@ public sealed class BatchExportService
         var prefix = FileNameSanitizer.SanitizePrefix(options.FileNamePrefix);
         var width = ExportOptions.ClampWidth(options.ImageWidth);
 
+        // 讓引擎有機會共用昂貴的資源。PowerPoint 會因此整批只啟動一次，
+        // 而不是每個檔案都冷啟動再關閉（100 份簡報光啟動就要好幾分鐘）。
+        var batchScopes = new List<IDisposable>();
+        foreach (var converter in ordered)
+        {
+            try
+            {
+                if (converter.BeginBatch(cancellationToken) is { } scope) batchScopes.Add(scope);
+            }
+            catch (Exception ex)
+            {
+                _logger.Warn($"{converter.DisplayName} 無法建立共用工作階段：{ex.Message}");
+            }
+        }
+
+        try
+        {
+            RunJobs(jobs, results, ordered, options, prefix, width, total, progress, cancellationToken, ref cancelled);
+        }
+        finally
+        {
+            // 必須在同一條執行緒上釋放（COM 執行緒親和性），所以就放在這裡而不是等 GC
+            for (var i = batchScopes.Count - 1; i >= 0; i--)
+            {
+                try { batchScopes[i].Dispose(); }
+                catch (Exception ex) { _logger.Warn("結束共用工作階段時發生問題：" + ex.Message); }
+            }
+        }
+
+        if (cancellationToken.IsCancellationRequested) cancelled = true;
+
+        return new BatchExportReport
+        {
+            Results = results,
+            OutputRoot = options.OutputRoot,
+            WasCancelled = cancelled
+        };
+    }
+
+    private void RunJobs(
+        IReadOnlyList<ExportJob> jobs,
+        List<ExportResult> results,
+        IReadOnlyList<ISlideConverter> ordered,
+        ExportOptions options,
+        string prefix,
+        int width,
+        int total,
+        IProgress<ProgressReport>? progress,
+        CancellationToken cancellationToken,
+        ref bool cancelled)
+    {
         for (var index = 0; index < results.Count; index++)
         {
             var result = results[index];
@@ -116,7 +180,9 @@ public sealed class BatchExportService
                 // 保險層：任何未預期的例外都只影響這一個檔案
                 _logger.Error($"處理 {result.SourceName} 時發生未預期的錯誤。", ex);
                 result.Status = ExportStatus.Failed;
-                result.ErrorMessage = "發生未預期的錯誤：" + ex.Message;
+                result.ErrorMessage = DiskSpace.IsDiskFull(ex)
+                    ? "磁碟空間不足，無法繼續寫出圖片。請清出空間後重試，或把輸出位置改到別的磁碟。"
+                    : "發生未預期的錯誤：" + ex.Message;
             }
             finally
             {
@@ -134,15 +200,6 @@ public sealed class BatchExportService
                     : $"{result.SourceName}：{result.ErrorMessage ?? result.StatusText}"
             });
         }
-
-        if (cancellationToken.IsCancellationRequested) cancelled = true;
-
-        return new BatchExportReport
-        {
-            Results = results,
-            OutputRoot = options.OutputRoot,
-            WasCancelled = cancelled
-        };
     }
 
     private void ProcessSingle(
@@ -178,6 +235,13 @@ public sealed class BatchExportService
 
         var failures = new List<string>();
 
+        // 轉檔中途失敗（例如第 280 張時 PowerPoint 出錯）時，前面已經產生的圖片本身是好的，
+        // 直接刪掉等於白做。這裡先留著「最完整的一次嘗試」，等所有引擎都失敗後才交出去；
+        // 若後備引擎成功了就丟棄，否則使用者會拿到兩份輸出資料夾。
+        string? bestPartial = null;
+        var bestPartialCount = 0;
+        var bestPartialEngine = ConversionEngine.None;
+
         foreach (var converter in converters)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -211,6 +275,9 @@ public sealed class BatchExportService
 
                 var finalDirectory = PublishStaging(staging, options.OutputRoot, folderName);
 
+                // 這個引擎成功了，之前失敗嘗試留下的半成品就不需要了
+                if (bestPartial is not null) DiscardDirectory(bestPartial);
+
                 result.Status = ExportStatus.Success;
                 result.EngineUsed = converter.Engine;
                 result.ImageCount = files.Count;
@@ -223,6 +290,7 @@ public sealed class BatchExportService
                 // 已經產生的圖片仍然保留給使用者，只是狀態標記為「已取消」
                 if (HasFiles(staging))
                 {
+                    if (bestPartial is not null) DiscardDirectory(bestPartial);
                     result.OutputDirectory = PublishStaging(staging, options.OutputRoot, folderName);
                     result.ImageCount = CountFiles(result.OutputDirectory);
                     result.EngineUsed = converter.Engine;
@@ -230,6 +298,7 @@ public sealed class BatchExportService
                 else
                 {
                     DiscardDirectory(staging);
+                    if (bestPartial is not null) DiscardDirectory(bestPartial);
                 }
                 throw;
             }
@@ -237,13 +306,39 @@ public sealed class BatchExportService
             {
                 _logger.Warn($"{converter.DisplayName} 轉換 {result.SourceName} 失敗：{ex.Message}");
                 failures.Add($"{converter.DisplayName}：{ex.Message}");
-                DiscardDirectory(staging);
+
+                var produced = CountFiles(staging);
+                if (produced > bestPartialCount)
+                {
+                    if (bestPartial is not null) DiscardDirectory(bestPartial);
+                    bestPartial = staging;
+                    bestPartialCount = produced;
+                    bestPartialEngine = converter.Engine;
+                    _logger.Info($"保留 {converter.DisplayName} 已產生的 {produced} 張圖片，等其他引擎都失敗後再交出。");
+                }
+                else
+                {
+                    DiscardDirectory(staging);
+                }
             }
         }
 
         result.Status = ExportStatus.Failed;
         result.ErrorMessage = failures.Count > 0 ? string.Join("；", failures) : "沒有可用的轉換方式。";
         result.OutputDirectory = null;
+
+        // 所有引擎都失敗了。有半成品就交給使用者，總比整批重來好。
+        if (bestPartial is not null && bestPartialCount > 0)
+        {
+            result.OutputDirectory = PublishStaging(bestPartial, options.OutputRoot, folderName);
+            result.ImageCount = CountFiles(result.OutputDirectory);
+            result.EngineUsed = bestPartialEngine;
+            result.ErrorMessage += $"（中途失敗前已完成的 {result.ImageCount} 張圖片仍保留在輸出資料夾）";
+        }
+        else if (bestPartial is not null)
+        {
+            DiscardDirectory(bestPartial);
+        }
     }
 
     /// <summary>暫存資料夾建立在輸出根目錄底下，確保與正式位置同一個磁碟區，搬移才會是瞬間完成。</summary>

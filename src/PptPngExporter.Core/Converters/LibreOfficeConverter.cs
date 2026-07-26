@@ -16,14 +16,43 @@ namespace PptPngExporter.Core.Converters;
 /// </summary>
 public sealed class LibreOfficeConverter : ISlideConverter
 {
+    /// <summary>再小的檔案也至少給這麼久。</summary>
+    public static readonly TimeSpan BaseTimeout = TimeSpan.FromMinutes(5);
+
+    /// <summary>來源檔每 1 MB 追加的寬限時間。</summary>
+    public static readonly TimeSpan TimeoutPerMegabyte = TimeSpan.FromSeconds(6);
+
+    /// <summary>再大的檔案也不會等超過這麼久，避免真的卡死時無限等待。</summary>
+    public static readonly TimeSpan MaxTimeout = TimeSpan.FromMinutes(30);
+
     private readonly IAppLogger _logger;
-    private readonly TimeSpan _timeout;
+    private readonly TimeSpan? _fixedTimeout;
     private bool? _available;
 
+    /// <param name="timeout">
+    /// 明確指定逾時。傳 null（預設）代表依來源檔大小自動計算，見 <see cref="TimeoutFor"/>。
+    /// </param>
     public LibreOfficeConverter(IAppLogger? logger = null, TimeSpan? timeout = null)
     {
         _logger = logger ?? NullLogger.Instance;
-        _timeout = timeout ?? TimeSpan.FromMinutes(5);
+        _fixedTimeout = timeout;
+    }
+
+    /// <summary>
+    /// 依來源檔大小推算轉檔逾時。
+    ///
+    /// 原本是固定 5 分鐘，與投影片數量無關。300 張、含大量圖片的簡報在一般辦公室機器上
+    /// 很容易超過，結果整個檔案失敗而使用者無處可調。改成隨檔案大小加碼——檔案大小雖然
+    /// 不等於頁數，但在不先解析簡報的前提下，這是最接近的代理指標。
+    /// </summary>
+    public static TimeSpan TimeoutFor(long sourceBytes)
+    {
+        if (sourceBytes <= 0) return BaseTimeout;
+
+        var megabytes = sourceBytes / 1024d / 1024d;
+        var scaled = BaseTimeout + TimeSpan.FromSeconds(TimeoutPerMegabyte.TotalSeconds * megabytes);
+
+        return scaled > MaxTimeout ? MaxTimeout : scaled;
     }
 
     public ConversionEngine Engine => ConversionEngine.LibreOffice;
@@ -139,7 +168,11 @@ public sealed class LibreOfficeConverter : ISlideConverter
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
 
-        var deadline = DateTime.UtcNow + _timeout;
+        var sourceBytes = TryGetLength(stagedSource);
+        var timeout = _fixedTimeout ?? TimeoutFor(sourceBytes);
+        _logger.Info($"LibreOffice 逾時設為 {timeout.TotalMinutes:0.#} 分鐘（來源 {sourceBytes / 1024d / 1024d:0.#} MB）。");
+
+        var deadline = DateTime.UtcNow + timeout;
         while (!process.WaitForExit(200))
         {
             if (cancellationToken.IsCancellationRequested)
@@ -151,7 +184,10 @@ public sealed class LibreOfficeConverter : ISlideConverter
             if (DateTime.UtcNow > deadline)
             {
                 KillTree(process);
-                throw new ConversionException($"LibreOffice 轉換超過 {_timeout.TotalMinutes:0} 分鐘仍未完成，已中止這個檔案。");
+                throw new ConversionException(
+                    $"LibreOffice 轉換超過 {timeout.TotalMinutes:0.#} 分鐘仍未完成，已中止這個檔案。" +
+                    "這份簡報可能過大或含有 LibreOffice 難以處理的內容；" +
+                    "可以試著把它拆成幾份較小的簡報，或改用 PowerPoint 轉換。");
             }
         }
 
@@ -210,28 +246,42 @@ public sealed class LibreOfficeConverter : ISlideConverter
         var done = 0;
         progress?.Report(new SlideProgress(0, pages.Count));
 
-        foreach (var pageNumber in pages)
+        // 一次載入、只算需要的頁面。
+        //
+        // 原本是每頁 pdfStream.Position = 0 再呼叫一次 ToImage，PDFium 每次都重新解析整份
+        // 文件，成本隨頁數成長（實測 300 頁的合成 PDF：逐頁 1247 ms、單次載入 271 ms）。
+        // ToImages 回傳的是惰性序列，因此仍然可以邊產出邊回報進度、邊檢查取消。
+        pdfStream.Position = 0;
+        var zeroBased = pages.Select(p => p - 1);
+
+        foreach (var bitmap in Conversion.ToImages(pdfStream, zeroBased, leaveOpen: true, password: null, options: options))
         {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            var baseName = naming.Build(done + 1, pageNumber);
-            var target = UniquePathResolver.ResolveFile(request.OutputDirectory, baseName, ".png");
-
-            pdfStream.Position = 0;
-            using (var bitmap = Conversion.ToImage(pdfStream, page: pageNumber - 1, leaveOpen: true, password: null, options: options))
-            using (var image = SKImage.FromBitmap(bitmap))
-            using (var data = image.Encode(SKEncodedImageFormat.Png, 100))
-            using (var output = new FileStream(LongPath.Extended(target), FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            using (bitmap)
             {
-                data.SaveTo(output);
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var pageNumber = pages[done];
+                var baseName = naming.Build(done + 1, pageNumber);
+                var target = UniquePathResolver.ResolveFile(request.OutputDirectory, baseName, ".png");
+
+                using (var image = SKImage.FromBitmap(bitmap))
+                using (var data = image.Encode(SKEncodedImageFormat.Png, 100))
+                using (var output = new FileStream(LongPath.Extended(target), FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                {
+                    data.SaveTo(output);
+                }
+
+                written.Add(target);
             }
 
-            written.Add(target);
             // 注意：計數必須獨立一行。寫成 progress?.Report(new SlideProgress(++done, ...))
             // 時，progress 為 null 會讓整個引數不被求值，++done 永遠不會執行。
             done++;
             progress?.Report(new SlideProgress(done, pages.Count));
         }
+
+        if (written.Count == 0)
+            throw new ConversionException("PDF 算繪沒有產生任何圖片。");
 
         return written;
     }
@@ -247,6 +297,12 @@ public sealed class LibreOfficeConverter : ISlideConverter
         {
             _logger.Warn("中止 LibreOffice 程序時發生問題：" + ex.Message);
         }
+    }
+
+    private static long TryGetLength(string path)
+    {
+        try { return new FileInfo(path).Length; }
+        catch { return 0; }
     }
 
     private static string ToFileUri(string directory)

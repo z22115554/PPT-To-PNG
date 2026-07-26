@@ -256,7 +256,20 @@ public sealed class UpdateService
 
         var incoming = PortableUpdateInstaller.ResolveExecutable(downloadedFile, Path.Combine(workDir, "extracted"));
 
-        PortableUpdateInstaller.Swap(currentExe, incoming);
+        try
+        {
+            PortableUpdateInstaller.Swap(currentExe, incoming);
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException && !IsWritable(currentExe))
+        {
+            // 免安裝版被放在 Program Files 之類需要管理員權限的位置時會走到這裡。
+            // 泛用的「更新失敗」訊息幫不上忙——使用者需要知道換個位置就好。
+            _logger.Warn($"沒有權限替換 {currentExe}：{ex.Message}");
+            return UpdateInstallResult.Failed(
+                $"沒有權限替換目前的執行檔（{Path.GetDirectoryName(currentExe)}）。" +
+                "免安裝版請放在「文件」、「下載」或桌面等自己有寫入權限的資料夾；" +
+                "若要安裝在 Program Files，請改用安裝版。");
+        }
         _logger.Info("免安裝版已就地替換完成。");
 
         if (!_launchAfterUpdate)
@@ -323,6 +336,25 @@ public sealed class UpdateService
     private static void TryDeleteDirectory(string path)
     {
         try { if (Directory.Exists(path)) Directory.Delete(path, recursive: true); } catch { }
+    }
+
+    /// <summary>執行檔所在的資料夾是不是可以寫入。用來分辨「權限不足」與其他替換失敗。</summary>
+    internal static bool IsWritable(string executablePath)
+    {
+        try
+        {
+            var directory = Path.GetDirectoryName(executablePath);
+            if (string.IsNullOrEmpty(directory)) return false;
+
+            var probe = Path.Combine(directory, $".pptpng-write-test-{Guid.NewGuid():N}.tmp");
+            using (File.Create(probe)) { }
+            File.Delete(probe);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     /// <summary>清理舊的下載暫存與更新備份。程式啟動時呼叫。</summary>

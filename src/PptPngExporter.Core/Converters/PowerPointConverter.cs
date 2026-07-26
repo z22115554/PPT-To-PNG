@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using PptPngExporter.Core.Interop;
@@ -62,64 +61,69 @@ public sealed class PowerPointConverter : ISlideConverter
         }
     }
 
+    /// <summary>
+    /// 開始一批轉檔：整批共用同一個 PowerPoint 執行個體，避免每個檔案都冷啟動一次。
+    /// 回傳的物件必須在同一條 STA 執行緒上釋放。
+    /// </summary>
+    public IDisposable? BeginBatch(CancellationToken cancellationToken)
+    {
+        if (!OperatingSystem.IsWindows() || !IsAvailable()) return null;
+
+        try
+        {
+            _batchSession = PowerPointSession.Create(_logger, cancellationToken);
+            return new BatchScope(this);
+        }
+        catch (Exception ex)
+        {
+            // 開不起來就退回「每個檔案各自開一次」，由 Convert 去回報真正的錯誤
+            _logger.Warn("無法建立共用的 PowerPoint 工作階段，將改為每個檔案各自啟動：" + ex.Message);
+            _batchSession = null;
+            return null;
+        }
+    }
+
+    private PowerPointSession? _batchSession;
+
+    private sealed class BatchScope : IDisposable
+    {
+        private readonly PowerPointConverter _owner;
+        public BatchScope(PowerPointConverter owner) => _owner = owner;
+
+        public void Dispose()
+        {
+            var session = _owner._batchSession;
+            _owner._batchSession = null;
+            session?.Dispose();
+        }
+    }
+
     public IReadOnlyList<string> Convert(ConversionRequest request, IProgress<SlideProgress>? progress, CancellationToken cancellationToken)
     {
         if (!OperatingSystem.IsWindows())
             throw new ConversionException("PowerPoint 轉換只能在 Windows 上使用。");
 
-        var policy = new PowerPointSessionPolicy(IsPowerPointRunning());
-        _logger.Info("PowerPoint 工作階段：" + policy.Describe());
+        // 整批共用的 session 若存在就沿用，否則自己開一個並負責關閉
+        var session = _batchSession;
+        var ownsSession = session is null;
+        session ??= PowerPointSession.Create(_logger, cancellationToken);
 
-        var guard = new OwnedProcessGuard(_logger);
+        // PowerPoint 忙碌時每次呼叫最多重試 10 秒。掛上這次的權杖，按下停止才不必等重試跑完；
+        // 由 App / Presentations 衍生出來的 Slides / Slide 會自動繼承。
+        session.UseToken(cancellationToken);
 
-        ComObject? app = null;
-        ComObject? presentations = null;
+        var policy = session.Policy;
         ComObject? presentation = null;
-        OfficeSettingsGuard? settings = null;
         var weOpenedPresentation = false;
 
         try
         {
-            app = ComObject.TryCreate(ProgId)
-                  ?? throw new ConversionException("無法啟動 PowerPoint，請確認 Office 安裝是否正常。");
-
-            var comApp = app;
-            settings = new OfficeSettingsGuard(
-                read: name => comApp.TryGetInt(name),
-                write: (name, value) => comApp.TrySet(name, value),
-                logger: _logger);
-
-            // 這一行必須在開啟任何外部簡報「之前」執行。
-            // Office 自動化的巨集安全性預設是 msoAutomationSecurityLow（直接執行巨集），
-            // 使用者拖進來的 .ppt / .pps 可能夾帶巨集。
-            if (!settings.Apply(AutomationSecurity, AutomationSecurityForceDisable))
-                _logger.Warn("無法設定 AutomationSecurity，這個版本的 PowerPoint 可能不支援；巨集停用無法保證。");
-
-            settings.Apply(DisplayAlerts, AlertsNone);
-
-            // 只登記由我們啟動的執行個體，作為 Quit 失敗時的最後手段
-            if (policy.MayKillLeftoverProcesses)
-            {
-                var pid = TryGetProcessId(app);
-                if (pid is { } value)
-                {
-                    guard.Track(value);
-                    _logger.Info($"本程式啟動的 PowerPoint PID = {value}。");
-                }
-                else
-                {
-                    _logger.Warn("無法取得 PowerPoint 的 PID，結束時只會呼叫 Quit()，不做強制關閉。");
-                }
-            }
-
-            presentations = app.GetObject("Presentations");
-
             var fullPath = Path.GetFullPath(request.SourcePath);
-            presentation = FindAlreadyOpen(presentations, fullPath);
+            presentation = session.FindAlreadyOpen(fullPath);
 
             if (presentation is null)
             {
-                presentation = presentations.CallObject(
+                presentation = session.Presentations.CallObject(
                     "Open",
                     fullPath,   // FileName
                     MsoTrue,    // ReadOnly
@@ -192,86 +196,10 @@ public sealed class PowerPointConverter : ISlideConverter
                 SafeClose(presentation);
 
             presentation?.Dispose();
-            presentations?.Dispose();
 
-            // 還原 AutomationSecurity 與 DisplayAlerts。借用使用者的執行個體時這是必要的。
-            settings?.Dispose();
-
-            if (app is not null && policy.MayQuitApplication) SafeQuit(app);
-            else if (app is not null) _logger.Info("PowerPoint 由使用者開啟，保持原狀不關閉。");
-
-            app?.Dispose();
-
-            GC.Collect();
-            GC.WaitForPendingFinalizers();
-
-            // 只會動到上面明確登記的 PID
-            guard.KillSurvivors(TimeSpan.FromSeconds(8));
+            // 整批共用時，Application 由 BatchScope 在整批結束後才釋放
+            if (ownsSession) session.Dispose();
         }
-    }
-
-    private static bool IsPowerPointRunning()
-    {
-        try
-        {
-            foreach (var p in Process.GetProcessesByName("POWERPNT")) { p.Dispose(); return true; }
-            return false;
-        }
-        catch
-        {
-            // 查不到時保守處理：當作使用者已開啟，寧可不關也不要誤關
-            return true;
-        }
-    }
-
-    /// <summary>由 Application.HWND 反查實際的程序 ID。</summary>
-    private int? TryGetProcessId(ComObject app)
-    {
-        try
-        {
-            var hwnd = app.TryGetInt("HWND");
-            if (hwnd is not { } handle || handle == 0) return null;
-
-            _ = GetWindowThreadProcessId(new IntPtr(handle), out var pid);
-            return pid == 0 ? null : (int)pid;
-        }
-        catch (Exception ex)
-        {
-            _logger.Warn("取得 PowerPoint PID 失敗：" + ex.Message);
-            return null;
-        }
-    }
-
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
-
-    private ComObject? FindAlreadyOpen(ComObject presentations, string fullPath)
-    {
-        try
-        {
-            var count = presentations.Get<int>("Count");
-            for (var i = 1; i <= count; i++)
-            {
-                var candidate = presentations.CallObject("Item", i);
-                try
-                {
-                    var name = candidate.GetOrDefault<string>("FullName", string.Empty);
-                    if (!string.IsNullOrEmpty(name) &&
-                        string.Equals(Path.GetFullPath(name), fullPath, StringComparison.OrdinalIgnoreCase))
-                    {
-                        return candidate;
-                    }
-                }
-                catch { }
-                candidate.Dispose();
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.Warn("列舉已開啟的簡報時發生問題：" + ex.Message);
-        }
-
-        return null;
     }
 
     private static void ExportSlide(ComObject slide, string targetPath, int width, int height)
@@ -326,16 +254,17 @@ public sealed class PowerPointConverter : ISlideConverter
         catch (Exception ex) { _logger.Warn("關閉簡報時發生問題：" + ex.Message); }
     }
 
-    private void SafeQuit(ComObject app)
-    {
-        try { app.Call("Quit"); }
-        catch (Exception ex) { _logger.Warn("結束 PowerPoint 時發生問題：" + ex.Message); }
-    }
-
     private static string DescribeComError(ComInvocationException com) => (uint)com.ComHResult switch
     {
         0x80020003 => $"PowerPoint 不認得自動化指令「{com.MemberName}」。這通常代表 Office 版本較舊或安裝檔案損毀，請試著修復 Office，或改用 LibreOffice 轉換。",
         0x800A175D => "PowerPoint 目前正忙碌或有對話視窗開啟，請關閉後再試一次。",
+
+        // 這三個是 COM「伺服器忙碌」類錯誤。ComObject 已經自動重試過 10 秒仍未成功，
+        // 代表 PowerPoint 真的卡住了——最常見的原因是它跳出對話框在等使用者回應。
+        0x80010001 or 0x8001010A or 0x800AC472 =>
+            "PowerPoint 持續忙碌，重試 10 秒後仍無回應。請切到 PowerPoint 視窗看看是不是有對話框" +
+            "（例如字型遺失、修復檔案的提示）在等待回應，處理完再試一次；或改用 LibreOffice 轉換。",
+
         0x80048240 => "PowerPoint 無法開啟這個檔案，檔案可能已損毀或格式不受支援。",
         0x80004005 => "PowerPoint 回報一般性錯誤，這個檔案可能已受密碼保護或損毀。",
         _ => $"PowerPoint 轉換失敗（{com.MemberName}，錯誤碼 0x{com.ComHResult:X8}）。"

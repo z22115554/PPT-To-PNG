@@ -46,6 +46,10 @@ public partial class App : Application
 
         // 啟動檢查放在視窗顯示之後，不拖慢開啟速度
         _ = viewModel.CheckForUpdatesOnStartupAsync();
+
+        // 縮圖快取只增不減：簡報每改一次、程式每更新一版都會多出一整套，
+        // 舊的永遠不會再被命中。在背景清掉過期與超量的部分。
+        _ = Task.Run(() => SlidePreviewService.SweepCache(_logger));
     }
 
     private void OnDispatcherUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)

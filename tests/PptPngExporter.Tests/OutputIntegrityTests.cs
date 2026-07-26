@@ -95,8 +95,14 @@ public class OutputIntegrityTests : IDisposable
         Assert.All(files, f => Assert.NotEqual("半成品", File.ReadAllText(f)));
     }
 
+    /// <summary>
+    /// 全部引擎都失敗時，已經產生的圖片要留給使用者。
+    ///
+    /// 一份 300 張的簡報若在第 280 張才失敗，把前面 279 張一起刪掉等於白做一次。
+    /// 狀態仍然是「失敗」，但輸出資料夾與張數會填上，訊息也會說明是半成品。
+    /// </summary>
     [Fact]
-    public void 全部引擎失敗時半成品也會被清掉()
+    public void 全部引擎失敗時保留已完成的圖片()
     {
         var outputRoot = Path.Combine(_root, "輸出");
         var source = CreateSource("簡報.pptx");
@@ -111,9 +117,70 @@ public class OutputIntegrityTests : IDisposable
         var report = new BatchExportService(new ISlideConverter[] { halfWritten })
             .Run(new[] { source }, Options(outputRoot));
 
+        var result = report.Results[0];
+
+        Assert.Equal(ExportStatus.Failed, result.Status);
+        Assert.NotNull(result.OutputDirectory);
+        Assert.True(Directory.Exists(result.OutputDirectory!));
+        Assert.Single(Directory.GetFiles(result.OutputDirectory!));
+        Assert.Equal(1, result.ImageCount);
+        Assert.Contains("仍保留", result.ErrorMessage);
+    }
+
+    /// <summary>一張都沒產生就不要留下空資料夾，否則輸出位置會被失敗的嘗試塞滿。</summary>
+    [Fact]
+    public void 完全沒產生圖片時不會留下空資料夾()
+    {
+        var outputRoot = Path.Combine(_root, "輸出");
+        var source = CreateSource("簡報.pptx");
+
+        var failing = new FakeConverter(ConversionEngine.PowerPoint, _ => throw new ConversionException("失敗"));
+
+        var report = new BatchExportService(new ISlideConverter[] { failing })
+            .Run(new[] { source }, Options(outputRoot));
+
         Assert.Equal(ExportStatus.Failed, report.Results[0].Status);
         Assert.Null(report.Results[0].OutputDirectory);
         Assert.False(Directory.Exists(Path.Combine(outputRoot, "簡報")));
+        Assert.Empty(Directory.GetDirectories(outputRoot));
+    }
+
+    /// <summary>
+    /// 兩個引擎都失敗時，保留「產出比較多」的那一份，而不是最後一個嘗試的。
+    /// </summary>
+    [Fact]
+    public void 全部失敗時保留產出最多的那一次嘗試()
+    {
+        var outputRoot = Path.Combine(_root, "輸出");
+        var source = CreateSource("簡報.pptx");
+
+        var manyThenFail = new FakeConverter(ConversionEngine.PowerPoint, request =>
+        {
+            LongPath.EnsureDirectory(request.OutputDirectory);
+            for (var i = 1; i <= 5; i++)
+                File.WriteAllText(Path.Combine(request.OutputDirectory, $"投影片_0{i}.png"), "PowerPoint");
+            throw new ConversionException("PowerPoint 失敗");
+        });
+
+        var fewThenFail = new FakeConverter(ConversionEngine.LibreOffice, request =>
+        {
+            LongPath.EnsureDirectory(request.OutputDirectory);
+            File.WriteAllText(Path.Combine(request.OutputDirectory, "投影片_01.png"), "LibreOffice");
+            throw new ConversionException("LibreOffice 失敗");
+        });
+
+        var report = new BatchExportService(new ISlideConverter[] { manyThenFail, fewThenFail })
+            .Run(new[] { source }, Options(outputRoot));
+
+        var result = report.Results[0];
+
+        Assert.Equal(ExportStatus.Failed, result.Status);
+        Assert.Equal(5, result.ImageCount);
+        Assert.Equal(ConversionEngine.PowerPoint, result.EngineUsed);
+        Assert.All(Directory.GetFiles(result.OutputDirectory!), f => Assert.Equal("PowerPoint", File.ReadAllText(f)));
+
+        // 只能有一個輸出資料夾——另一次嘗試的半成品必須被清掉
+        Assert.Single(Directory.GetDirectories(outputRoot));
     }
 
     [Theory]

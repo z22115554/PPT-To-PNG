@@ -43,7 +43,18 @@ public sealed class ComObject : IDisposable
 
     public object Instance => _instance ?? throw new ObjectDisposedException(nameof(ComObject));
 
+    /// <summary>
+    /// 讓「伺服器忙碌」的重試等待可以被取消。
+    ///
+    /// PowerPoint 忙碌時每次呼叫最多會重試 10 秒；沒有這個權杖的話，使用者按下「停止」
+    /// 之後還要等它把重試跑完才會有反應，而且接下來的每一頁都會再等一次。
+    /// 由 <see cref="GetObject"/> / <see cref="CallObject"/> 產生的子物件會自動繼承。
+    /// </summary>
+    public CancellationToken CancellationToken { get; set; }
+
     public static ComObject Wrap(object instance) => new(instance, ownsInstance: true);
+
+    private ComObject WrapChild(object instance) => new(instance, ownsInstance: true) { CancellationToken = CancellationToken };
 
     /// <summary>依 ProgID 建立（或取得既有的）COM 執行個體；找不到元件時回傳 null。</summary>
     public static ComObject? TryCreate(string progId)
@@ -66,7 +77,7 @@ public sealed class ComObject : IDisposable
     /// DISP_E_MEMBERNOTFOUND (0x80020003)。
     /// </summary>
     public ComObject GetObject(string memberName, params object?[] args)
-        => Wrap(InvokeCore(BindingFlags.GetProperty | BindingFlags.InvokeMethod, memberName, args)
+        => WrapChild(InvokeCore(BindingFlags.GetProperty | BindingFlags.InvokeMethod, memberName, args)
                 ?? throw new InvalidOperationException($"COM 成員 {memberName} 回傳 null。"));
 
     public T Get<T>(string memberName, params object?[] args)
@@ -103,7 +114,7 @@ public sealed class ComObject : IDisposable
         => InvokeCore(BindingFlags.InvokeMethod, memberName, args);
 
     public ComObject CallObject(string memberName, params object?[] args)
-        => Wrap(InvokeCore(BindingFlags.InvokeMethod, memberName, args)
+        => WrapChild(InvokeCore(BindingFlags.InvokeMethod, memberName, args)
                 ?? throw new InvalidOperationException($"COM 方法 {memberName} 回傳 null。"));
 
     /// <summary>
@@ -125,11 +136,11 @@ public sealed class ComObject : IDisposable
             }
             catch (TargetInvocationException tie) when (tie.InnerException is COMException com && IsBusy(com) && attempt < maxAttempts)
             {
-                Thread.Sleep(250);
+                WaitBeforeRetry();
             }
             catch (COMException com) when (IsBusy(com) && attempt < maxAttempts)
             {
-                Thread.Sleep(250);
+                WaitBeforeRetry();
             }
             catch (TargetInvocationException tie) when (tie.InnerException is not null)
             {
@@ -146,6 +157,22 @@ public sealed class ComObject : IDisposable
             }
         }
     }
+
+    /// <summary>等待下一次重試。使用者按下停止時立刻中斷，不用把重試次數跑完。</summary>
+    private void WaitBeforeRetry()
+    {
+        CancellationToken.ThrowIfCancellationRequested();
+
+        // WaitHandle.WaitOne 在權杖被取消時會立即返回，等同可中斷的 Sleep
+        if (CancellationToken.CanBeCanceled)
+            CancellationToken.WaitHandle.WaitOne(RetryDelayMilliseconds);
+        else
+            Thread.Sleep(RetryDelayMilliseconds);
+
+        CancellationToken.ThrowIfCancellationRequested();
+    }
+
+    private const int RetryDelayMilliseconds = 250;
 
     private static bool IsBusy(COMException com)
         => com.HResult is RPC_E_CALL_REJECTED or RPC_E_SERVERCALL_RETRYLATER or VBA_E_IGNORE;

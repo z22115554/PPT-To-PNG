@@ -1,11 +1,26 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <!--
+      需要 net8.0-windows + UseWPF 才能參考 App 專案：
+      挑選視窗的虛擬化版面計算（BoardLayout）沒有辦法用眼睛驗證，必須有單元測試涵蓋。
+    -->
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
     <IsPackable>false</IsPackable>
     <AssemblyName>PptPngExporter.Tests</AssemblyName>
     <RootNamespace>PptPngExporter.Tests</RootNamespace>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      UseWPF 會換掉隱含 using 的清單（改成 System.Windows 那一組），
+      System.IO 與 System.Net.Http 會因此消失。這裡補回來，
+      免得每個測試檔都要加 using。
+    -->
+    <Using Include="System.IO" />
+    <Using Include="System.Net.Http" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
@@ -22,6 +37,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\PptPngExporter.Core\PptPngExporter.Core.csproj" />
+    <ProjectReference Include="..\..\src\PptPngExporter.App\PptPngExporter.App.csproj" />
   </ItemGroup>
 
 </Project>

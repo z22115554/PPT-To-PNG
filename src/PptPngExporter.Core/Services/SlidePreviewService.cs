@@ -44,7 +44,16 @@ public sealed class SlidePreviewService
     /// <summary>
     /// 取得（必要時產生）指定簡報的所有投影片縮圖，依頁碼排序。
     /// </summary>
-    public SlidePreview GetPreview(string sourcePath, EnginePreference preference, int thumbnailWidth, CancellationToken cancellationToken)
+    /// <param name="progress">
+    /// 逐頁進度。第一次預覽一份 300 頁的簡報要跑好幾分鐘，沒有這個的話進度條會整段停在 0%。
+    /// 命中快取時不會回報（因為是瞬間完成的）。
+    /// </param>
+    public SlidePreview GetPreview(
+        string sourcePath,
+        EnginePreference preference,
+        int thumbnailWidth,
+        CancellationToken cancellationToken,
+        IProgress<SlideProgress>? progress = null)
     {
         var fullPath = Path.GetFullPath(sourcePath);
 
@@ -99,7 +108,7 @@ public sealed class SlidePreviewService
 
                 try
                 {
-                    var produced = converter.Convert(request, null, cancellationToken);
+                    var produced = converter.Convert(request, progress, cancellationToken);
                     if (produced.Count == 0) throw new ConversionException("這份簡報沒有任何投影片。");
 
                     // 用「實際成功的引擎」當作快取鍵，後備轉換的結果才不會被誤認成主引擎的
@@ -130,6 +139,106 @@ public sealed class SlidePreviewService
         finally
         {
             TryDelete(staging);
+        }
+    }
+
+    /// <summary>超過這個時間沒被用到的快取會在啟動時清掉。</summary>
+    public static readonly TimeSpan CacheMaxAge = TimeSpan.FromDays(14);
+
+    /// <summary>快取總量上限。超過時從最久沒用到的開始刪。</summary>
+    public const long CacheBudgetBytes = 2L * 1024 * 1024 * 1024;
+
+    /// <summary>
+    /// 清掉過期或超量的縮圖快取。程式啟動時呼叫。回傳釋放的位元組數。
+    ///
+    /// 快取鍵包含簡報的最後修改時間與程式版本，所以每改一次簡報、每更新一次程式，
+    /// 就會多出一整套快取，舊的永遠不會被用到。沒有這個清理機制的話，
+    /// 一份常改的 300 頁簡報可以在幾個月內累積數 GB，而使用者不會知道要去按「清除快取」。
+    /// </summary>
+    public static long SweepCache(IAppLogger? logger = null)
+    {
+        var log = logger ?? NullLogger.Instance;
+
+        try
+        {
+            if (!Directory.Exists(CacheRoot)) return 0;
+
+            var entries = new List<(string Path, long Size, DateTime LastUsed)>();
+
+            foreach (var dir in Directory.EnumerateDirectories(CacheRoot))
+            {
+                try
+                {
+                    var files = Directory.GetFiles(dir, "*", SearchOption.AllDirectories);
+                    var size = 0L;
+                    var lastUsed = Directory.GetCreationTimeUtc(dir);
+
+                    foreach (var file in files)
+                    {
+                        var info = new FileInfo(file);
+                        size += info.Length;
+                        if (info.LastWriteTimeUtc > lastUsed) lastUsed = info.LastWriteTimeUtc;
+                    }
+
+                    entries.Add((dir, size, lastUsed));
+                }
+                catch
+                {
+                    // 讀不到的資料夾就跳過，不要因此中斷整個清理
+                }
+            }
+
+            var freed = 0L;
+            var now = DateTime.UtcNow;
+
+            // 先刪過期的
+            var survivors = new List<(string Path, long Size, DateTime LastUsed)>();
+            foreach (var entry in entries)
+            {
+                if (now - entry.LastUsed > CacheMaxAge)
+                {
+                    if (TryDeleteReporting(entry.Path)) freed += entry.Size;
+                }
+                else
+                {
+                    survivors.Add(entry);
+                }
+            }
+
+            // 還是超過預算的話，從最久沒用到的開始刪
+            var total = survivors.Sum(e => e.Size);
+            if (total > CacheBudgetBytes)
+            {
+                foreach (var entry in survivors.OrderBy(e => e.LastUsed))
+                {
+                    if (total <= CacheBudgetBytes) break;
+                    if (!TryDeleteReporting(entry.Path)) continue;
+
+                    total -= entry.Size;
+                    freed += entry.Size;
+                }
+            }
+
+            if (freed > 0) log.Info($"已清理縮圖快取 {freed / 1024d / 1024d:0.#} MB。");
+            return freed;
+        }
+        catch (Exception ex)
+        {
+            log.Warn("清理縮圖快取時發生問題：" + ex.Message);
+            return 0;
+        }
+    }
+
+    private static bool TryDeleteReporting(string directory)
+    {
+        try
+        {
+            Directory.Delete(directory, recursive: true);
+            return true;
+        }
+        catch
+        {
+            return false;
         }
     }
 

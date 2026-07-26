@@ -2,6 +2,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="clr-namespace:PptPngExporter.App.ViewModels"
+        xmlns:infra="clr-namespace:PptPngExporter.App.Infrastructure"
         Title="挑選要輸出的頁面"
         Height="760" Width="1040" MinHeight="520" MinWidth="760"
         WindowStartupLocation="CenterOwner"
@@ -36,97 +37,111 @@
 
         <Border Grid.Row="1" Style="{StaticResource Card}">
             <Grid>
-                <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="14,12">
-                    <ItemsControl ItemsSource="{Binding Groups}">
-                        <ItemsControl.ItemTemplate>
+                <!--
+                    攤平成單一清單再交給 SlideBoardPanel 虛擬化。
+                    原本是巢狀 ItemsControl + WrapPanel，三者都不虛擬化，
+                    10 份 × 300 頁會一次建立 3000 個視覺元素並解碼 3000 張圖。
+                -->
+                <ItemsControl ItemsSource="{Binding BoardItems}"
+                              VirtualizingPanel.IsVirtualizing="True"
+                              VirtualizingPanel.VirtualizationMode="Recycling">
+                    <!--
+                        ScrollViewer 必須放在 ItemsControl 的範本「裡面」。
+                        包在外面的話，面板不是 ScrollContentPresenter 的直接子項，
+                        WPF 不會採用它的 IScrollInfo，於是面板拿到無限高度、
+                        所有項目都算「看得到」——虛擬化會完全失效（而且外觀正常，看不出來）。
+                    -->
+                    <ItemsControl.Template>
+                        <ControlTemplate TargetType="ItemsControl">
+                            <ScrollViewer CanContentScroll="True" Focusable="False"
+                                          VerticalScrollBarVisibility="Auto"
+                                          HorizontalScrollBarVisibility="Disabled"
+                                          Padding="14,12">
+                                <ItemsPresenter />
+                            </ScrollViewer>
+                        </ControlTemplate>
+                    </ItemsControl.Template>
+
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <infra:SlideBoardPanel />
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+
+                        <ItemsControl.Resources>
                             <DataTemplate DataType="{x:Type vm:SlideGroup}">
-                                <StackPanel Margin="0,0,0,20">
+                                <Grid VerticalAlignment="Bottom" Margin="0,0,0,10">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
 
-                                    <Grid Margin="0,0,0,10">
-                                        <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="*" />
-                                            <ColumnDefinition Width="Auto" />
-                                        </Grid.ColumnDefinitions>
+                                    <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                                        <TextBlock Text="{Binding FileName}" Style="{StaticResource SectionTitle}"
+                                                   TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Text="{Binding StatusText}" Style="{StaticResource HintText}"
+                                                   Margin="0,2,0,0" />
+                                        <TextBlock Text="{Binding ErrorMessage}" Style="{StaticResource ErrorText}"
+                                                   Margin="0,4,0,0"
+                                                   TextTrimming="CharacterEllipsis"
+                                                   Visibility="{Binding ErrorMessage, Converter={StaticResource NotEmptyToVis}}" />
+                                    </StackPanel>
 
-                                        <StackPanel Grid.Column="0" VerticalAlignment="Center">
-                                            <TextBlock Text="{Binding FileName}" Style="{StaticResource SectionTitle}"
-                                                       TextTrimming="CharacterEllipsis" />
-                                            <TextBlock Text="{Binding StatusText}" Style="{StaticResource HintText}"
-                                                       Margin="0,2,0,0" />
-                                            <TextBlock Text="{Binding ErrorMessage}" Style="{StaticResource ErrorText}"
-                                                       Margin="0,4,0,0"
-                                                       Visibility="{Binding ErrorMessage, Converter={StaticResource NotEmptyToVis}}" />
-                                        </StackPanel>
-
-                                        <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                                            <Button Content="本份全選" Style="{StaticResource GhostButton}"
-                                                    Command="{Binding SelectAllCommand}" />
-                                            <Button Content="本份全不選" Style="{StaticResource GhostButton}"
-                                                    Command="{Binding SelectNoneCommand}" />
-                                            <Button Content="反選" Style="{StaticResource GhostButton}"
-                                                    Command="{Binding InvertCommand}" />
-                                        </StackPanel>
-                                    </Grid>
-
-                                    <ItemsControl ItemsSource="{Binding Slides}">
-                                        <ItemsControl.ItemsPanel>
-                                            <ItemsPanelTemplate>
-                                                <WrapPanel Orientation="Horizontal" />
-                                            </ItemsPanelTemplate>
-                                        </ItemsControl.ItemsPanel>
-                                        <ItemsControl.ItemTemplate>
-                                            <DataTemplate DataType="{x:Type vm:SlideThumbnail}">
-                                                <Border x:Name="Card" Width="212" Margin="0,0,10,10"
-                                                        CornerRadius="8" Padding="5"
-                                                        Background="{StaticResource SurfaceAltBrush}"
-                                                        BorderBrush="{StaticResource BorderBrush2}"
-                                                        BorderThickness="2"
-                                                        Cursor="Hand"
-                                                        MouseLeftButtonUp="OnThumbnailClick">
-                                                    <StackPanel>
-                                                        <Grid>
-                                                            <Border CornerRadius="4" ClipToBounds="True"
-                                                                    Background="White" MinHeight="80">
-                                                                <Image Source="{Binding Image}" Stretch="Uniform" />
-                                                            </Border>
-
-                                                            <Border HorizontalAlignment="Left" VerticalAlignment="Top"
-                                                                    Margin="6" CornerRadius="4" Padding="6,2"
-                                                                    Background="{StaticResource InkBrush}" Opacity="0.85">
-                                                                <TextBlock Text="{Binding PageLabel}" FontSize="11"
-                                                                           FontWeight="SemiBold" Foreground="White" />
-                                                            </Border>
-
-                                                            <Border x:Name="Tick" HorizontalAlignment="Right" VerticalAlignment="Top"
-                                                                    Margin="6" Width="22" Height="22" CornerRadius="11"
-                                                                    Background="{StaticResource AccentBrush}"
-                                                                    Visibility="Collapsed">
-                                                                <Path Data="M 5 11 L 9 15 L 17 6" Stroke="White" StrokeThickness="2.2"
-                                                                      StrokeStartLineCap="Round" StrokeEndLineCap="Round"
-                                                                      StrokeLineJoin="Round" />
-                                                            </Border>
-                                                        </Grid>
-                                                    </StackPanel>
-                                                </Border>
-
-                                                <DataTemplate.Triggers>
-                                                    <DataTrigger Binding="{Binding IsSelected}" Value="True">
-                                                        <Setter TargetName="Card" Property="BorderBrush" Value="{StaticResource AccentBrush}" />
-                                                        <Setter TargetName="Card" Property="Background" Value="{StaticResource AccentSoftBrush}" />
-                                                        <Setter TargetName="Tick" Property="Visibility" Value="Visible" />
-                                                    </DataTrigger>
-                                                    <DataTrigger Binding="{Binding IsSelected}" Value="False">
-                                                        <Setter TargetName="Card" Property="Opacity" Value="0.55" />
-                                                    </DataTrigger>
-                                                </DataTemplate.Triggers>
-                                            </DataTemplate>
-                                        </ItemsControl.ItemTemplate>
-                                    </ItemsControl>
-                                </StackPanel>
+                                    <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                        <Button Content="本份全選" Style="{StaticResource GhostButton}"
+                                                Command="{Binding SelectAllCommand}" />
+                                        <Button Content="本份全不選" Style="{StaticResource GhostButton}"
+                                                Command="{Binding SelectNoneCommand}" />
+                                        <Button Content="反選" Style="{StaticResource GhostButton}"
+                                                Command="{Binding InvertCommand}" />
+                                    </StackPanel>
+                                </Grid>
                             </DataTemplate>
-                        </ItemsControl.ItemTemplate>
-                    </ItemsControl>
-                </ScrollViewer>
+
+                            <DataTemplate DataType="{x:Type vm:SlideThumbnail}">
+                                <Border x:Name="Card" Margin="0,0,10,10"
+                                        CornerRadius="8" Padding="5"
+                                        Background="{StaticResource SurfaceAltBrush}"
+                                        BorderBrush="{StaticResource BorderBrush2}"
+                                        BorderThickness="2"
+                                        Cursor="Hand"
+                                        MouseLeftButtonUp="OnThumbnailClick">
+                                    <Grid>
+                                        <Border CornerRadius="4" ClipToBounds="True" Background="White">
+                                            <Image Source="{Binding Image}" Stretch="Uniform" />
+                                        </Border>
+
+                                        <Border HorizontalAlignment="Left" VerticalAlignment="Top"
+                                                Margin="6" CornerRadius="4" Padding="6,2"
+                                                Background="{StaticResource InkBrush}" Opacity="0.85">
+                                            <TextBlock Text="{Binding PageLabel}" FontSize="11"
+                                                       FontWeight="SemiBold" Foreground="White" />
+                                        </Border>
+
+                                        <Border x:Name="Tick" HorizontalAlignment="Right" VerticalAlignment="Top"
+                                                Margin="6" Width="22" Height="22" CornerRadius="11"
+                                                Background="{StaticResource AccentBrush}"
+                                                Visibility="Collapsed">
+                                            <Path Data="M 5 11 L 9 15 L 17 6" Stroke="White" StrokeThickness="2.2"
+                                                  StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                                  StrokeLineJoin="Round" />
+                                        </Border>
+                                    </Grid>
+                                </Border>
+
+                                <DataTemplate.Triggers>
+                                    <DataTrigger Binding="{Binding IsSelected}" Value="True">
+                                        <Setter TargetName="Card" Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+                                        <Setter TargetName="Card" Property="Background" Value="{StaticResource AccentSoftBrush}" />
+                                        <Setter TargetName="Tick" Property="Visibility" Value="Visible" />
+                                    </DataTrigger>
+                                    <DataTrigger Binding="{Binding IsSelected}" Value="False">
+                                        <Setter TargetName="Card" Property="Opacity" Value="0.55" />
+                                    </DataTrigger>
+                                </DataTemplate.Triggers>
+                            </DataTemplate>
+                    </ItemsControl.Resources>
+                </ItemsControl>
 
                 <Border Background="#F2FFFFFF"
                         Visibility="{Binding IsLoading, Converter={StaticResource BoolToVis}}">

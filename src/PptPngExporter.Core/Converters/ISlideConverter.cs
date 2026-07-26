@@ -46,6 +46,15 @@ public interface ISlideConverter
     /// 執行轉檔並回傳實際寫出的圖片路徑。失敗請擲出 <see cref="ConversionException"/>。
     /// </summary>
     IReadOnlyList<string> Convert(ConversionRequest request, IProgress<SlideProgress>? progress, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// 宣告接下來會連續轉換多個檔案，讓引擎有機會把昂貴的資源留著重複使用
+    /// （PowerPoint 會共用同一個 Application，省下每個檔案一次的冷啟動）。
+    ///
+    /// 回傳 null 代表這個引擎沒有可共用的東西。回傳的物件必須在整批結束時、
+    /// 且在<b>同一條執行緒</b>上釋放——COM 物件有執行緒親和性。
+    /// </summary>
+    IDisposable? BeginBatch(CancellationToken cancellationToken) => null;
 }
 
 public interface IAppLogger

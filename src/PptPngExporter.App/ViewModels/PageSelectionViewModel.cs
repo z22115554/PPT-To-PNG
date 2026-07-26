@@ -63,7 +63,7 @@ public sealed class SlideThumbnail : ObservableObject
 }
 
 /// <summary>挑選視窗中的一份簡報（含它的所有縮圖）。</summary>
-public sealed class SlideGroup : ObservableObject
+public sealed class SlideGroup : ObservableObject, IBoardHeader
 {
     private string _statusText = string.Empty;
     private string? _errorMessage;
@@ -174,6 +174,15 @@ public sealed class PageSelectionViewModel : ObservableObject
 
     public ObservableCollection<SlideGroup> Groups { get; } = new();
 
+    /// <summary>
+    /// 攤平後的清單：群組標題與它底下的縮圖依序排在一起，供
+    /// <see cref="SlideBoardPanel"/> 虛擬化使用。
+    ///
+    /// 虛擬化面板需要一份「index 連續」的清單才能只具現化可見的項目；
+    /// 巢狀的 Groups → Slides 結構做不到這件事。
+    /// </summary>
+    public ObservableCollection<object> BoardItems { get; } = new();
+
     public RelayCommand SelectAllCommand { get; }
     public RelayCommand SelectNoneCommand { get; }
     public RelayCommand CancelLoadingCommand { get; }
@@ -237,14 +246,30 @@ public sealed class PageSelectionViewModel : ObservableObject
                 var group = new SlideGroup(item);
                 group.SelectionChanged += (_, _) => RefreshSummary();
                 Groups.Add(group);
+                BoardItems.Add(group);
 
                 LoadingText = $"正在準備預覽：{item.FileName}（{i + 1} / {Items.Count}）";
                 LoadProgress = Items.Count == 0 ? 0 : i * 100d / Items.Count;
 
+                // 逐頁進度。一份 300 頁的簡報第一次預覽要跑好幾分鐘，
+                // 只回報「第幾份檔案」的話，整段時間畫面上完全看不出有在動。
+                var fileIndex = i;
+                var fileCount = Items.Count;
+                var slideProgress = new Progress<SlideProgress>(sp =>
+                {
+                    if (sp.Total <= 0) return;
+
+                    LoadingText = $"正在準備預覽：{item.FileName}" +
+                                  $"（{fileIndex + 1} / {fileCount}）— 第 {Math.Min(sp.Completed + 1, sp.Total)} / {sp.Total} 頁";
+
+                    var perFile = 100d / Math.Max(1, fileCount);
+                    LoadProgress = Math.Clamp(fileIndex * perFile + perFile * sp.Completed / sp.Total, 0, 100);
+                });
+
                 try
                 {
                     var preview = await StaRunner.RunAsync(() =>
-                        _previews.GetPreview(item.FullPath, _preference, SlidePreviewService.DefaultThumbnailWidth, token));
+                        _previews.GetPreview(item.FullPath, _preference, SlidePreviewService.DefaultThumbnailWidth, token, slideProgress));
 
                     var previouslyPicked = item.SelectedPages;
 
@@ -256,6 +281,7 @@ public sealed class PageSelectionViewModel : ObservableObject
                             IsSelected = previouslyPicked is null || previouslyPicked.Contains(page)
                         };
                         group.Add(thumb);
+                        BoardItems.Add(thumb);
                     }
                 }
                 catch (OperationCanceledException)
