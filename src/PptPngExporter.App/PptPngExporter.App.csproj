@@ -32,6 +32,11 @@
     <None Update="Resources\app.ico">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <!-- 更新來源設定，讓使用者不必重新編譯就能改 GitHub 儲存庫 -->
+    <None Include="..\..\update.config.json" Condition="Exists('..\..\update.config.json')">
+      <Link>update.config.json</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 
 </Project>

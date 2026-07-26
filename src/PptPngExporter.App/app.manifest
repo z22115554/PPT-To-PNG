@@ -4,12 +4,12 @@
 
   <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
     <application>
-      <!-- Windows 10 / 11 -->
+      <!--
+        只宣告實際支援的系統。本程式建於 .NET 8，最低需求為 Windows 10 版本 1607；
+        微軟已無任何支援 Windows 7 / 8 / 8.1 的 .NET 版本，因此不再宣告那些 GUID。
+        下列 GUID 同時涵蓋 Windows 10 與 Windows 11。
+      -->
       <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}" />
-      <supportedOS Id="{1f676c76-80e1-4239-95bb-83d0f6d0da78}" />
-      <supportedOS Id="{4a2f28e3-53b9-4441-ba9c-d69d4a4a6e38}" />
-      <supportedOS Id="{35138b9a-5d96-4fbd-8e2d-a2440225f93a}" />
-      <supportedOS Id="{e2011457-1546-43c5-a5fe-008deee3d3f0}" />
     </application>
   </compatibility>
 

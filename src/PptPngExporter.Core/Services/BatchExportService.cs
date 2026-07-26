@@ -16,6 +16,9 @@ public sealed class BatchExportService
     /// <summary>支援的簡報副檔名。</summary>
     public static readonly IReadOnlyList<string> SupportedExtensions = new[] { ".ppt", ".pptx", ".pps", ".ppsx" };
 
+    /// <summary>暫存資料夾的名稱前綴。</summary>
+    private const string StagingPrefix = "~pptpng-tmp-";
+
     private readonly IReadOnlyList<ISlideConverter> _converters;
     private readonly IAppLogger _logger;
 
@@ -57,11 +60,16 @@ public sealed class BatchExportService
         var cancelled = false;
 
         LongPath.EnsureDirectory(options.OutputRoot);
+        SweepStaleStaging(options.OutputRoot);
 
-        var ordered = OrderConverters(options.Engine);
-        if (ordered.Count == 0)
+        var hasPowerPoint = _converters.Any(c => c.Engine == ConversionEngine.PowerPoint && c.IsAvailable());
+        var hasLibreOffice = _converters.Any(c => c.Engine == ConversionEngine.LibreOffice && c.IsAvailable());
+        var blocker = EngineAvailability.DescribeBlocker(options.Engine, hasPowerPoint, hasLibreOffice);
+
+        var ordered = EngineAvailability.Order(_converters, options.Engine);
+        if (blocker is not null || ordered.Count == 0)
         {
-            var reason = DescribeNoEngine(options.Engine);
+            var reason = blocker ?? EngineAvailability.DescribeBlocker(options.Engine, false, false)!;
             foreach (var r in results)
             {
                 r.Status = ExportStatus.Failed;
@@ -102,7 +110,6 @@ public sealed class BatchExportService
             {
                 cancelled = true;
                 result.Status = ExportStatus.Cancelled;
-                CleanUpEmptyOutput(result);
             }
             catch (Exception ex)
             {
@@ -110,7 +117,6 @@ public sealed class BatchExportService
                 _logger.Error($"處理 {result.SourceName} 時發生未預期的錯誤。", ex);
                 result.Status = ExportStatus.Failed;
                 result.ErrorMessage = "發生未預期的錯誤：" + ex.Message;
-                CleanUpEmptyOutput(result);
             }
             finally
             {
@@ -159,20 +165,6 @@ public sealed class BatchExportService
         }
 
         var folderName = FileNameSanitizer.Sanitize(Path.GetFileNameWithoutExtension(result.SourcePath), "簡報");
-        var outputDirectory = UniquePathResolver.ResolveDirectory(options.OutputRoot, folderName);
-        result.OutputDirectory = outputDirectory;
-
-        var request = new ConversionRequest
-        {
-            SourcePath = result.SourcePath,
-            OutputDirectory = outputDirectory,
-            // 這份簡報若有單獨挑選的頁面就用它，否則沿用整批的設定
-            Pages = job.Pages ?? options.Pages,
-            ImageWidth = width,
-            FileNamePrefix = prefix,
-            Numbering = options.Numbering,
-            NumberDigits = options.NumberDigits
-        };
 
         var slideProgress = new Progress<SlideProgress>(sp => progress?.Report(new ProgressReport
         {
@@ -196,39 +188,135 @@ public sealed class BatchExportService
                 continue;
             }
 
+            // 每次嘗試都用全新的暫存資料夾。
+            // 這樣即使前一個引擎留下半成品且刪除失敗（檔案被防毒或索引服務鎖住），
+            // 下一個引擎也絕對不會寫進同一個資料夾。
+            var staging = CreateStagingDirectory(options.OutputRoot);
+
+            var request = new ConversionRequest
+            {
+                SourcePath = result.SourcePath,
+                OutputDirectory = staging,
+                Pages = job.Pages ?? options.Pages,
+                ImageWidth = width,
+                FileNamePrefix = prefix,
+                Numbering = options.Numbering,
+                NumberDigits = options.NumberDigits
+            };
+
             try
             {
                 _logger.Info($"使用 {converter.DisplayName} 轉換 {result.SourceName}。");
                 var files = converter.Convert(request, slideProgress, cancellationToken);
 
+                var finalDirectory = PublishStaging(staging, options.OutputRoot, folderName);
+
                 result.Status = ExportStatus.Success;
                 result.EngineUsed = converter.Engine;
                 result.ImageCount = files.Count;
-                result.OutputDirectory = outputDirectory;
+                result.OutputDirectory = finalDirectory;
                 result.ErrorMessage = null;
                 return;
             }
             catch (OperationCanceledException)
             {
+                // 已經產生的圖片仍然保留給使用者，只是狀態標記為「已取消」
+                if (HasFiles(staging))
+                {
+                    result.OutputDirectory = PublishStaging(staging, options.OutputRoot, folderName);
+                    result.ImageCount = CountFiles(result.OutputDirectory);
+                    result.EngineUsed = converter.Engine;
+                }
+                else
+                {
+                    DiscardDirectory(staging);
+                }
                 throw;
             }
             catch (Exception ex)
             {
                 _logger.Warn($"{converter.DisplayName} 轉換 {result.SourceName} 失敗：{ex.Message}");
                 failures.Add($"{converter.DisplayName}：{ex.Message}");
-
-                // 這個資料夾是本次新建且專屬於這個檔案的，整個丟棄是安全的。
-                // 不這麼做的話，下一個引擎會把圖片寫進已有半成品的資料夾裡，造成頁面重複或混雜。
-                DiscardDirectory(outputDirectory);
+                DiscardDirectory(staging);
             }
         }
 
         result.Status = ExportStatus.Failed;
-        result.ErrorMessage = failures.Count > 0
-            ? string.Join("；", failures)
-            : "沒有可用的轉換方式。";
+        result.ErrorMessage = failures.Count > 0 ? string.Join("；", failures) : "沒有可用的轉換方式。";
         result.OutputDirectory = null;
-        DiscardDirectory(outputDirectory);
+    }
+
+    /// <summary>暫存資料夾建立在輸出根目錄底下，確保與正式位置同一個磁碟區，搬移才會是瞬間完成。</summary>
+    private static string CreateStagingDirectory(string outputRoot)
+    {
+        var path = Path.Combine(outputRoot, StagingPrefix + Guid.NewGuid().ToString("N")[..10]);
+        LongPath.EnsureDirectory(path);
+        return path;
+    }
+
+    /// <summary>把暫存資料夾搬到最終位置。名稱在搬移前才決定，避免與期間新建的資料夾撞名。</summary>
+    private string PublishStaging(string staging, string outputRoot, string folderName)
+    {
+        for (var attempt = 1; attempt <= 5; attempt++)
+        {
+            var target = UniquePathResolver.ResolveDirectory(outputRoot, folderName);
+            try
+            {
+                Directory.Move(LongPath.Extended(staging), LongPath.Extended(target));
+                return target;
+            }
+            catch (IOException ex) when (attempt < 5)
+            {
+                _logger.Warn($"搬移輸出資料夾失敗（第 {attempt} 次）：{ex.Message}");
+                Thread.Sleep(150);
+            }
+        }
+
+        // 搬不動就退而求其次，逐檔複製過去
+        var fallback = UniquePathResolver.ResolveDirectory(outputRoot, folderName);
+        LongPath.EnsureDirectory(fallback);
+        foreach (var file in Directory.EnumerateFiles(LongPath.Extended(staging)))
+        {
+            var name = Path.GetFileName(file);
+            File.Copy(file, LongPath.Extended(Path.Combine(fallback, name)), overwrite: false);
+        }
+        DiscardDirectory(staging);
+        return fallback;
+    }
+
+    private static bool HasFiles(string directory)
+    {
+        try { return Directory.Exists(LongPath.Extended(directory)) && Directory.EnumerateFiles(LongPath.Extended(directory)).Any(); }
+        catch { return false; }
+    }
+
+    private static int CountFiles(string? directory)
+    {
+        try { return directory is null ? 0 : Directory.GetFiles(LongPath.Extended(directory)).Length; }
+        catch { return 0; }
+    }
+
+    /// <summary>清掉上次執行留下的暫存資料夾（例如程式被強制結束）。只動超過一天的，避免影響同時執行的另一個執行個體。</summary>
+    private void SweepStaleStaging(string outputRoot)
+    {
+        try
+        {
+            if (!Directory.Exists(LongPath.Extended(outputRoot))) return;
+
+            foreach (var dir in Directory.EnumerateDirectories(LongPath.Extended(outputRoot), StagingPrefix + "*"))
+            {
+                try
+                {
+                    if (Directory.GetCreationTimeUtc(dir) < DateTime.UtcNow.AddDays(-1))
+                        Directory.Delete(dir, recursive: true);
+                }
+                catch { }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.Warn("清理舊暫存資料夾時發生問題：" + ex.Message);
+        }
     }
 
     /// <summary>刪除本次為單一檔案建立的輸出資料夾（含其中的半成品）。</summary>
@@ -245,42 +333,4 @@ public sealed class BatchExportService
         }
     }
 
-    /// <summary>失敗或取消時，移除還沒有任何圖片的空資料夾，避免留下垃圾。</summary>
-    private void CleanUpEmptyOutput(ExportResult result)
-    {
-        var dir = result.OutputDirectory;
-        if (string.IsNullOrEmpty(dir)) return;
-
-        try
-        {
-            var extended = LongPath.Extended(dir);
-            if (!Directory.Exists(extended)) return;
-
-            if (!Directory.EnumerateFileSystemEntries(extended).Any())
-            {
-                Directory.Delete(extended);
-                if (result.Status != ExportStatus.Success) result.OutputDirectory = null;
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.Warn($"清理輸出資料夾時發生問題：{ex.Message}");
-        }
-    }
-
-    private IReadOnlyList<ISlideConverter> OrderConverters(EnginePreference preference) => preference switch
-    {
-        EnginePreference.PowerPointOnly => _converters.Where(c => c.Engine == ConversionEngine.PowerPoint).ToList(),
-        EnginePreference.LibreOfficeOnly => _converters.Where(c => c.Engine == ConversionEngine.LibreOffice).ToList(),
-        _ => _converters
-            .OrderBy(c => c.Engine == ConversionEngine.PowerPoint ? 0 : c.Engine == ConversionEngine.LibreOffice ? 1 : 2)
-            .ToList()
-    };
-
-    private static string DescribeNoEngine(EnginePreference preference) => preference switch
-    {
-        EnginePreference.PowerPointOnly => "目前設定為只用 PowerPoint 轉換，但這台電腦沒有偵測到 PowerPoint。",
-        EnginePreference.LibreOfficeOnly => "目前設定為只用 LibreOffice 轉換，但這台電腦沒有偵測到 LibreOffice。",
-        _ => "找不到可用的轉換方式，請安裝 Microsoft PowerPoint 或 LibreOffice。"
-    };
 }

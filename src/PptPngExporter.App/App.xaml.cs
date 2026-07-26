@@ -4,6 +4,7 @@ using PptPngExporter.App.ViewModels;
 using PptPngExporter.App.Views;
 using PptPngExporter.Core.Converters;
 using PptPngExporter.Core.Services;
+using PptPngExporter.Core.Updates;
 
 namespace PptPngExporter.App;
 
@@ -28,13 +29,23 @@ public partial class App : Application
             args.SetObserved();
         };
 
-        var window = new MainWindow(new MainViewModel(_logger));
+        // 清掉上一次更新留下的備份與暫存
+        UpdateService.CleanUpAfterUpdate(_logger);
+
+        var viewModel = new MainViewModel(_logger);
+        var window = new MainWindow(viewModel);
         MainWindow = window;
 
+        // 更新完成後由新版接手，本程式結束
+        viewModel.ExitRequested += (_, _) => Dispatcher.BeginInvoke(Shutdown);
+
         // 支援用「以此程式開啟」或拖到執行檔上啟動
-        if (e.Args.Length > 0) window.ViewModel.AddPaths(e.Args);
+        if (e.Args.Length > 0) _ = window.ViewModel.AddPathsAsync(e.Args);
 
         window.Show();
+
+        // 啟動檢查放在視窗顯示之後，不拖慢開啟速度
+        _ = viewModel.CheckForUpdatesOnStartupAsync();
     }
 
     private void OnDispatcherUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)

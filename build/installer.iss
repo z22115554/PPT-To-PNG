@@ -3,7 +3,11 @@
 ; 建置前請先執行 build\publish-installer-payload.ps1 產生 artifacts\installer-payload
 
 #define AppName "PPT PNG 匯出工具"
-#define AppVersion "1.1.1"
+; 版本號由 publish-installer-payload.ps1 從 Directory.Build.props 讀出後以 /DAppVersion 傳入，
+; 避免兩個地方各寫一份而忘記同步。手動用 Inno Setup 開啟時才會用到下面的預設值。
+#ifndef AppVersion
+  #define AppVersion "0.0.0-manual"
+#endif
 #define AppPublisher "PPT PNG Exporter"
 #define AppExeName "PPT PNG 匯出工具.exe"
 
@@ -17,7 +21,9 @@ DefaultDirName={autopf}\PptPngExporter
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 OutputDir=..\artifacts
-OutputBaseFilename=PPT-PNG-匯出工具-安裝程式-{#AppVersion}
+; 檔名保持純 ASCII：GitHub 上傳 Release 附件會把非 ASCII 字元換成句點，
+; 而自動更新要用 update-manifest.json 裡的 fileName 去比對附件名稱。
+OutputBaseFilename=PPT-PNG-Exporter-v{#AppVersion}-Setup
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern

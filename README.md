@@ -12,12 +12,12 @@
 
 | 檔案 | 說明 |
 |---|---|
-| `PPT-PNG-Exporter-1.1.1-Setup.exe` | 安裝版，會建立開始功能表捷徑與右鍵選單 |
-| `PPT-PNG-Exporter-1.1.1-Portable-win-x64.exe` | 免安裝版，下載後直接雙擊執行 |
+| `PPT-PNG-Exporter-v1.3.0-Setup.exe` | 安裝版，會建立開始功能表捷徑與右鍵選單 |
+| `PPT-PNG-Exporter-v1.3.0-Portable-win-x64.exe` | 免安裝版，下載後直接雙擊執行 |
 
-兩種都自帶 .NET 執行階段，不需要另外安裝。
+兩種都自帶 .NET 執行階段，不需要另外安裝。首次執行時 Windows SmartScreen 可能會因為沒有程式碼簽章而攔截，選「其他資訊 → 仍要執行」即可。
 
-> 建置腳本產出的檔名是中文的（`PPT-PNG-匯出工具-…`），但 GitHub 上傳附件時會把非 ASCII 字元換成句點，因此 Release 上的檔名改用英文。
+> 發行檔名一律用 ASCII。GitHub 上傳 Release 附件時會把非 ASCII 字元換成句點（中文檔名會變成 `PPT-PNG-.-.-win-x64.exe`），而自動更新是拿 `update-manifest.json` 裡的 `fileName` 去比對附件名稱的，被改名就會找不到下載網址。
 
 ---
 
@@ -25,13 +25,13 @@
 
 ### 免安裝版
 
-下載 `PPT-PNG-Exporter-1.1.1-Portable-win-x64.exe`，放到任何位置後雙擊執行。
+下載 `PPT-PNG-Exporter-v1.3.0-Portable-win-x64.exe`，放到任何位置後雙擊執行。
 
 不需要解壓縮，不需要安裝 .NET，不需要系統管理員權限。整個程式（含 .NET 執行階段）就是這一個檔案，第一次啟動會自我解壓到暫存資料夾，因此會比安裝版慢幾秒。
 
 ### 安裝版
 
-執行 `PPT-PNG-Exporter-1.1.1-Setup.exe`，依畫面指示完成。安裝後可從開始功能表開啟，也可以在 `.ppt` / `.pptx` 檔案上按右鍵選「用 PPT PNG 匯出工具開啟」。
+執行 `PPT-PNG-Exporter-v1.3.0-Setup.exe`，依畫面指示完成。安裝後可從開始功能表開啟，也可以在 `.ppt` / `.pptx` 檔案上按右鍵選「用 PPT PNG 匯出工具開啟」。
 
 ### 操作流程
 
@@ -84,9 +84,91 @@
 
 ---
 
+## 自動更新
+
+程式會在啟動時向 GitHub 查詢是否有新版本（每 20 小時最多一次），也可以隨時按右上角的**檢查更新**。
+
+有新版時畫面上方會出現橫幅：
+
+- **立即更新** — 下載、驗證、替換、重新啟動，全程在程式內完成
+- **查看說明** — 開啟 GitHub 的發行頁面看更新內容
+- **略過此版** — 這一版不再提醒（之後有更新版還是會提醒）
+
+### 更新怎麼進行
+
+| 安裝方式 | 更新方式 |
+|---|---|
+| 免安裝版 | 下載新的 .exe，就地替換（舊檔改名備份）後自動重新啟動 |
+| 安裝版 | 下載新的安裝程式並以靜默模式執行，由 Inno Setup 覆蓋安裝 |
+| 從原始碼執行 | 不自動更新，只提示有新版 |
+
+免安裝版的替換用的是「改名」而不是「覆寫」：Windows 不允許覆寫執行中的 `.exe`，但允許改名。舊版會被改成 `.exe.old`，下次啟動時自動刪除。這比另外寫一支等待用的批次檔可靠，不會被防毒攔截，也不會有視窗閃爍。
+
+### 安全性
+
+- 更新資訊只從 HTTPS 取得
+- 每個更新檔都會比對 **SHA-256**，雜湊來自隨發行上傳的 `update-manifest.json`
+- 驗證失敗就中止，絕不替換執行檔
+- 沒有 `update-manifest.json` 的發行（例如更早的版本）會被視為「必須手動下載」，因為沒有雜湊可以驗證
+
+需要說明的限制：這套機制能擋下傳輸損毀與網路中間人竄改，但**擋不住 GitHub 帳號被入侵**。要防到那個層級需要程式碼簽章憑證，目前沒有。
+
+### 重大變更時不自動更新
+
+發行時加上 `-MajorChange` 參數，該版本的清單會標記 `requiresManualDownload`，使用者只會看到「請手動下載」的提示，不會出現「立即更新」按鈕。
+
+也可以用 `-MinimumInAppUpdateFrom 1.2.0` 指定「低於 1.2.0 的使用者必須手動重裝」，比全面禁止更精細。
+
+### 設定更新來源
+
+儲存庫位置寫在專案根目錄的 `update.config.json`，發佈時會複製到執行檔旁邊：
+
+```json
+{
+  "owner": "你的 GitHub 帳號",
+  "repository": "PptPngExporter",
+  "checkOnStartup": true,
+  "minimumHoursBetweenChecks": 20
+}
+```
+
+放在執行檔旁邊代表**改儲存庫不必重新編譯**。使用者也可以把 `checkOnStartup` 設為 `false` 關閉自動檢查。
+
+---
+
+## 發行新版本
+
+```powershell
+# 1. 改 Directory.Build.props 的 <Version>
+# 2. 雙擊 build\build-release.bat（或執行下列指令）
+powershell -ExecutionPolicy Bypass -File build\publish-release.ps1
+
+# 有重大架構變更、不希望使用者自動更新時：
+powershell -ExecutionPolicy Bypass -File build\publish-release.ps1 -MajorChange
+```
+
+腳本會依序：讀版本號 → 跑測試 → 建置免安裝版 → 建置安裝版 → 計算 SHA-256 → 產生 `update-manifest.json`，全部放進 `artifacts\`。
+
+接著到 GitHub 建立 Release：
+
+1. 標籤填 `v1.3.0`（要和 `Directory.Build.props` 的版本一致）
+2. 上傳 `artifacts\` 裡的三個檔案：
+   - `PPT-PNG-Exporter-v1.3.0-Portable-win-x64.exe`
+   - `PPT-PNG-Exporter-v1.3.0-Setup.exe`
+   - **`update-manifest.json`** ← 沒有這個，舊版就無法自動更新
+
+   附件檔名不可以改，`update-manifest.json` 裡的 `fileName` 是照著這些名字寫的。
+3. 發佈為 **Latest release**（程式查的是 `releases/latest`）
+
+> **v1.1.0 的使用者無法自動更新。** 更新功能是 1.3.0 才加入的，1.1.0 的程式裡沒有任何檢查更新的程式碼。那批使用者必須手動下載一次。從 1.3.0 開始，之後的 1.4.0、1.5.0 都能在程式內更新。
+
+---
+
 ## 系統需求
 
-- Windows 10 1607 以上（64 位元），或 Windows 11
+- **Windows 10 版本 1607（build 14393）以上，或 Windows 11**，64 位元
+- **不支援 Windows 7 / 8 / 8.1 / Vista**：本程式基於 .NET 8，微軟已不再有任何支援這些系統的 .NET 版本
+- 僅提供 x64 版本；32 位元 Windows 無法執行（`build\publish-portable.ps1 -Runtime win-arm64` 可產生 ARM64 版，但未經測試）
 - **Microsoft PowerPoint**（選用，有的話還原度最高）
 - **LibreOffice**（選用，沒有 PowerPoint 時的替代方案）— <https://zh-tw.libreoffice.org/>
 
@@ -121,6 +203,10 @@ Presentations.Open(檔案, ReadOnly:=True, WithWindow:=False)
 | PowerPoint 原本就開著 | 借用，**不呼叫 Quit、不強制關閉程序**，並還原被改動的 `DisplayAlerts` 設定 |
 | 目標簡報原本就開著 | 直接沿用該簡報，**不關閉它** |
 
+**巨集一律停用。** Office 自動化的巨集安全性預設是 `msoAutomationSecurityLow`，也就是「直接執行巨集不詢問」。本程式在開啟任何外部簡報**之前**會先把 `Application.AutomationSecurity` 設為 `msoAutomationSecurityForceDisable`，結束時還原成原值。`.ppt` 與 `.pps` 這類舊格式可能夾帶巨集，這一步是必要的防護。（`.pptm` 不在支援的副檔名內，加不進清單。）
+
+**強制收尾只針對確定屬於自己的程序。** 需要強制關閉時，PowerPoint 的 PID 由 `Application.HWND` 反查取得，LibreOffice 則以 Windows Job Object 綁定整棵程序樹。不做程序名稱掃描，因此不可能誤殺使用者在轉檔期間自己開啟的 Office 或 LibreOffice。
+
 採用**晚期繫結**（`Type.GetTypeFromProgID` + `IDispatch`），因此：
 
 - 專案不需要參考 `Microsoft.Office.Interop.PowerPoint`
@@ -153,6 +239,8 @@ LibreOffice 會以**獨立的暫存設定檔目錄**啟動（`-env:UserInstallat
 
 - **單一檔案失敗不會中斷整批工作。** 失敗的檔案標記為「失敗」並在該列顯示原因，其餘檔案照常繼續。
 - **引擎逐級後備。** PowerPoint 丟出例外時記錄原因、清掉半成品，再交給 LibreOffice；兩者都失敗才判定該檔失敗，錯誤訊息會同時列出兩邊的原因。
+- **引擎之間完全隔離。** 每個引擎都輸出到自己的暫存資料夾（建立在輸出根目錄底下，確保同磁碟區），成功後才整個搬到正式位置。即使前一個引擎留下半成品且因檔案被鎖住而刪不掉，下一個引擎也絕對不會寫進同一個資料夾。
+- **開始前就擋下不可能成功的組合。** 若選了「只用 PowerPoint」但機器沒有 PowerPoint，開始按鈕會直接停用並說明原因，不會讓使用者按下去之後看到一整排失敗。介面與批次服務共用 `EngineAvailability` 的同一份規則。
 - **絕不覆蓋。** 輸出資料夾與圖片檔同名時自動變成 `名稱 (2)`、`名稱 (3)`…；檢查時同時比對檔案與資料夾，避免同名衝突。
 - **失敗不留垃圾。** 失敗或取消時會刪除還沒有任何圖片的空資料夾。
 - **例外訊息中文化。** COM 錯誤碼會轉譯成使用者看得懂的說明（例如「PowerPoint 目前正忙碌或有對話視窗開啟」）。
@@ -183,8 +271,8 @@ LibreOffice 會以**獨立的暫存設定檔目錄**啟動（`-env:UserInstallat
 
 解壓縮原始碼後，打開 `build` 資料夾，雙擊：
 
-- **`建置免安裝版.bat`** → 產出單一 .exe 與 ZIP
-- **`建置安裝版.bat`** → 產出 setup.exe
+- **`build-portable.bat`** → 產出單一 .exe 與 ZIP
+- **`build-installer.bat`** → 產出 setup.exe
 
 不需要開 Visual Studio，不需要動 PowerShell 執行原則。產出都在 `artifacts\` 資料夾。
 
@@ -209,7 +297,7 @@ powershell -ExecutionPolicy Bypass -File build\publish-installer-payload.ps1
 
 > **編輯建置腳本時請注意編碼。**
 > `.ps1` 與 `.iss` 必須存成 **UTF-8 with BOM**。Windows PowerShell 5.1 與 Inno Setup 在沒有 BOM 時會改用系統 ANSI 編碼（繁體中文 Windows 為 CP950/Big5）讀取檔案，中文內容會變成亂碼並破壞語法。
-> `.bat` 則**絕對不能加 BOM**，否則 cmd.exe 會把 BOM 位元組當成第一個指令的一部分。
+> `.bat` 則**必須是純 ASCII 且不能加 BOM**：所有中文訊息一律由 PowerShell 輸出（PowerShell 以 WriteConsoleW 寫主控台，不受 codepage 影響），批次檔本身不含任何非 ASCII 位元組，從根本上排除編碼問題。
 > 測試專案的 `BuildScriptEncodingTests` 會自動檢查這些規則。
 
 兩個發佈腳本都會**先跑測試**，測試沒過就不會產出檔案；也會先檢查 .NET 8 SDK 是否存在，缺少時直接給出下載連結而不是丟一堆紅字。
@@ -236,14 +324,21 @@ PptPngExporter/
 │  │  ├─ Interop/ComObject.cs       晚期繫結 COM 包裝（含忙碌重試）
 │  │  ├─ Converters/
 │  │  │  ├─ ISlideConverter.cs      引擎介面與例外型別
+│  │  │  ├─ EngineAvailability.cs   引擎可用性的單一判斷來源
+│  │  │  ├─ OfficeSettingsGuard.cs  Office 設定的暫時覆寫與還原
 │  │  │  ├─ PowerPointConverter.cs  PowerPoint COM 引擎
 │  │  │  ├─ PowerPointSessionPolicy.cs 何時可以關閉 PowerPoint 的判斷
 │  │  │  ├─ LibreOfficeConverter.cs LibreOffice + PDFium 引擎
 │  │  │  └─ LibreOfficeLocator.cs   soffice.exe 探測
+│  │  ├─ Updates/
+│  │  │  ├─ UpdateModels.cs        版本比較、清單模型、更新策略判斷
+│  │  │  ├─ UpdateSource.cs        安裝方式偵測、GitHub 發行來源、雜湊驗證
+│  │  │  └─ UpdateService.cs       檢查、下載、就地替換
 │  │  └─ Services/
 │  │     ├─ BatchExportService.cs   批次流程、引擎後備、錯誤隔離
 │  │     ├─ SlidePreviewService.cs  縮圖產生與快取
-│  │     ├─ ProcessGuard.cs         背景程序清理
+│  │     ├─ ProcessSupervision.cs   Job Object 與已登記程序的收尾
+│  │     ├─ PresentationScanner.cs  資料夾遞迴掃描
 │  │     └─ FileLogger.cs           記錄檔
 │  │
 │  └─ PptPngExporter.App/           WPF 介面
@@ -256,19 +351,23 @@ PptPngExporter/
 │     ├─ ViewModels/                MainViewModel / PresentationItem
 │     └─ Infrastructure/            MVVM、Shell、STA 執行緒、設定、值轉換器
 │
-├─ tests/PptPngExporter.Tests/      xUnit，155 個測試
+├─ tests/PptPngExporter.Tests/      xUnit，267 個測試
 │  ├─ Assets/                      端到端測試用的真實簡報（6 頁與 10 頁）
 │  ├─ PageRangeParserTests.cs
 │  ├─ FileNameAndPathTests.cs
 │  ├─ BatchExportServiceTests.cs
 │  ├─ OutputIntegrityTests.cs      迴歸測試、中文長路徑、PowerPoint 工作階段策略
-│  ├─ BuildScriptEncodingTests.cs 建置腳本的 BOM 與 UTF-8 規則
+│  ├─ BuildScriptEncodingTests.cs 建置腳本的編碼與版本號規則
+│  ├─ HardeningTests.cs           安全性與穩定性強化的測試
+│  ├─ UpdateTests.cs              自動更新（68 個測試）
 │  ├─ PageSelectionTests.cs        編號規則與挑選頁面的端到端驗證
 │  └─ LibreOfficeIntegrationTests.cs
 │
 └─ build/
-   ├─ 建置免安裝版.bat              一鍵建置（雙擊即可）
-   ├─ 建置安裝版.bat                一鍵建置（雙擊即可）
+   ├─ build-release.bat             一鍵產生完整發行（含更新清單）
+   ├─ publish-release.ps1           發行流程與 update-manifest.json 產生
+   ├─ build-installer.bat           一鍵建置安裝版（雙擊即可）
+   ├─ build-portable.bat            一鍵建置免安裝版（雙擊即可）
    ├─ publish-portable.ps1          免安裝版
    ├─ publish-installer-payload.ps1 安裝程式
    ├─ installer.iss                 Inno Setup 指令碼
@@ -302,13 +401,15 @@ PowerPoint 與 LibreOffice 是**執行期的外部程式**，本專案不散布�
 dotnet test PptPngExporter.sln
 ```
 
-155 個測試，涵蓋：
+267 個測試，涵蓋：
 
 | 測試檔 | 涵蓋範圍 |
 |---|---|
 | `PageRangeParserTests` | 空白視為全部、範例格式、單頁、重疊合併、亂序排序、顛倒修正、開放式區間、超出頁數裁切、全形字元容錯、各種不合法輸入 |
 | `FileNameAndPathTests` | 非法字元、控制字元、結尾句點空白、Windows 保留名、空值退回預設、長度截斷、中文/日文/emoji 保留、前綴清理、補零規則；資料夾與檔案防覆蓋、遞增編號、檔案與資料夾同名衝突、既有檔案內容不被改寫 |
 | `PageSelectionTests` | 連續編號 vs 原始頁碼、位數設定與自動位數、位數不足不截斷、由勾選頁碼建立範圍、每份簡報各自的頁面選擇；**端到端**：真的挑第 1、5、7 頁匯出，驗證檔名為 001/002/003 且**內容與單獨匯出的第 1、5、7 張位元組相同**；縮圖產生、排序與快取重用 |
+| `UpdateTests` | 版本號解析與比較（含預發行版）；更新策略的 10 種分支；安裝方式偵測；就地替換、備份清理、ZIP 取出執行檔；SHA-256 驗證；GitHub API 解析與無清單時的相容退回；服務層的網路失敗、未設定、雜湊不符；**端到端**：以發行腳本實際產生的 JSON 格式走完下載→驗證→替換，並確認雜湊被竄改時執行檔不會被動到 |
+| `HardeningTests` | 巨集安全性覆寫與還原（含多項逆序還原、不支援時的行為、重複 Dispose）；只結束登記過的程序、Job Object 平台行為；引擎可用性判斷的 10 組組合與介面／批次服務訊息一致性；暫存隔離（半成品鎖住仍不混入、成功不留暫存、失敗不留資料夾、取消保留已完成圖片）；資料夾遞迴掃描、上限、去重、排序、取消、無權限目錄；快取鍵含引擎與版本 |
 | `BuildScriptEncodingTests` | `.ps1` / `.iss` 必須含 UTF-8 BOM、`.bat` 不可含 BOM、所有腳本必須是合法 UTF-8、一鍵批次檔存在且使用 `%~dp0` |
 | `BatchExportServiceTests` | 副檔名判斷、**單檔失敗不中斷整批**、未預期例外的隔離、PowerPoint 失敗自動改用 LibreOffice、成功時不呼叫後備引擎、未安裝時跳過、兩者皆失敗的合併訊息、僅用單一引擎模式、失敗不留空資料夾、每份簡報獨立資料夾、重複執行不覆蓋、同名不同來源分開輸出、檔案不存在的訊息、取消行為、頁碼與前綴傳遞、進度回報、輸出根目錄自動建立、寬度上下限 |
 
@@ -320,20 +421,21 @@ dotnet test PptPngExporter.sln
 
 1. **借用中的 PowerPoint 若跳出對話框會擋住轉換。** 程式借用使用者已開啟的 PowerPoint 時，若該視窗有未關閉的對話框，自動化呼叫會被拒絕（已內建重試）。批次量大時，建議先關閉 PowerPoint 讓程式自行啟動一個乾淨的執行個體。
 2. **PowerPoint 引擎需要互動式桌面工作階段。** 在 Windows 服務或某些工作排程器設定下（無使用者工作階段）COM 自動化會失敗，此時會自動改用 LibreOffice。
-3. **PowerPoint 一次只處理一份簡報。** COM 自動化不適合平行呼叫，因此批次是循序處理。大量檔案時 LibreOffice 路徑通常反而較快。
-4. **LibreOffice 的字型還原度取決於系統字型。** 簡報使用的字型若未安裝，LibreOffice 會替換成相近字型，排版可能略有位移。需要 100% 還原請使用有安裝 PowerPoint 的電腦。
-5. **受密碼保護的簡報無法轉換。** 程式不會跳出輸入密碼的對話框（那會卡住批次流程），會直接標記失敗並說明原因。
-6. **動畫只會輸出第一個狀態。** 每頁輸出一張靜態圖，不會展開逐步動畫。
-7. **免安裝版體積較大**（.exe 約 71 MB、ZIP 約 66 MB），因為內含完整的 .NET 執行階段。若確定使用者電腦已安裝 .NET 8 Desktop Runtime，可改用 framework-dependent 發佈縮到約 18 MB（實測值，其中大部分是 `libSkiaSharp.dll` 與 `pdfium.dll` 兩個原生元件）：
+3. **取消時會保留已完成的圖片。** 中途停止時，該檔案已產生的圖片仍會搬到正式資料夾，狀態標記為「已取消」，不會整批丟棄。
+4. **PowerPoint 一次只處理一份簡報。** COM 自動化不適合平行呼叫，因此批次是循序處理。大量檔案時 LibreOffice 路徑通常反而較快。
+5. **LibreOffice 的字型還原度取決於系統字型。** 簡報使用的字型若未安裝，LibreOffice 會替換成相近字型，排版可能略有位移。需要 100% 還原請使用有安裝 PowerPoint 的電腦。
+6. **受密碼保護的簡報無法轉換。** 程式不會跳出輸入密碼的對話框（那會卡住批次流程），會直接標記失敗並說明原因。
+7. **動畫只會輸出第一個狀態。** 每頁輸出一張靜態圖，不會展開逐步動畫。
+8. **免安裝版體積較大**（.exe 約 71 MB、ZIP 約 66 MB），因為內含完整的 .NET 執行階段。若確定使用者電腦已安裝 .NET 8 Desktop Runtime，可改用 framework-dependent 發佈縮到約 18 MB（實測值，其中大部分是 `libSkiaSharp.dll` 與 `pdfium.dll` 兩個原生元件）：
    ```powershell
    dotnet publish src\PptPngExporter.App -c Release -r win-x64 --self-contained false `
        -p:PublishSingleFile=true -p:DebugType=none -o artifacts\portable-lite
    ```
-8. **僅支援 x64 / ARM64 Windows。** 未提供 32 位元版本。
-9. **超長路徑仍受單一路徑段 255 字元限制。** 這是 NTFS 本身的限制，非本程式可繞過。
-10. **縮圖預覽第一次需要完整轉換一次簡報。** 大型簡報可能要等幾秒到幾十秒（有進度顯示、可中止）。之後會走快取。
-11. **投影片數量非常多時縮圖會吃記憶體。** 縮圖以 220 像素寬解碼，約每張 100 KB；上千張投影片時建議分批挑選。快取可在需要時手動刪除 `%LOCALAPPDATA%\PptPngExporter\preview`。
-12. **免安裝版的單一 .exe** 首次啟動時需要自我解壓縮，比資料夾版慢 1～2 秒。介意的話可用 `publish-portable.ps1 -SingleFile $false`。
+9. **僅支援 x64 / ARM64 Windows。** 未提供 32 位元版本。
+10. **超長路徑仍受單一路徑段 255 字元限制。** 這是 NTFS 本身的限制，非本程式可繞過。
+11. **縮圖預覽第一次需要完整轉換一次簡報。** 大型簡報可能要等幾秒到幾十秒（有進度顯示、可中止）。之後會走快取。
+12. **投影片數量非常多時縮圖會吃記憶體。** 縮圖以 220 像素寬解碼，約每張 100 KB；上千張投影片時建議分批挑選。快取可在需要時手動刪除 `%LOCALAPPDATA%\PptPngExporter\preview`。
+13. **免安裝版的單一 .exe** 首次啟動時需要自我解壓縮，比資料夾版慢 1～2 秒。介意的話可用 `publish-portable.ps1 -SingleFile $false`。
 
 ---
 
@@ -369,7 +471,7 @@ PowerPoint 有未關閉的對話框時會拒絕自動化呼叫。關閉所有 Po
 | 項目 | 結果 |
 |---|---|
 | `dotnet build PptPngExporter.sln -c Release` | 0 錯誤、0 警告（含 XAML 編譯） |
-| `dotnet test` | 155 個測試全數通過 |
+| `dotnet test` | 267 個測試全數通過 |
 | 端到端轉檔 | 以真實 6 頁 16:9 `.pptx` 實際跑完 LibreOffice → PDF → PDFium → PNG |
 | 輸出尺寸 | 指定 1920 得到 1920×1080、指定 3840 得到 3840×2160（讀 PNG 檔頭驗證） |
 | 頁碼範圍 | `2-3,6` 實際只產生 `02.png`、`03.png`、`06.png` |
@@ -381,7 +483,37 @@ PowerPoint 有未關閉的對話框時會拒絕自動化呼叫。關閉所有 Po
 | 縮圖服務 | 10 頁簡報產生 10 張縮圖、依頁序排列、第二次呼叫命中快取 |
 | 免安裝版發佈 | `win-x64` 自帶執行階段發佈成功，`libSkiaSharp.dll` 與 `pdfium.dll` 正確嵌入 |
 
-**尚未在本環境驗證的部分**（需要實體 Windows 機器）：
+### 實機驗證記錄
+
+測試環境：**Windows 10 64-bit，有安裝 Microsoft PowerPoint，未安裝 LibreOffice**（即「只有 PowerPoint」組態）。
+
+| 日期 | 測試內容 | 引擎 | 結果 |
+|---|---|---|---|
+| 2026-07 | 安裝版：安裝、啟動、完整輸出 | PowerPoint | 通過 |
+| 2026-07 | 安裝版：縮圖挑選頁面輸出 | PowerPoint | 通過 |
+| 2026-07 | 免安裝版：啟動、完整輸出 | PowerPoint | 通過 |
+| 2026-07 | 免安裝版：縮圖挑選頁面輸出 | PowerPoint | 通過 |
+
+**因此已確認可用的功能**：
+
+- PowerPoint COM 轉檔路徑（含 1.0.1 修正的 `Slides.Item` 呼叫方式，先前會回報 `0x80020003`）
+- 縮圖預覽產生（同樣走 PowerPoint COM 路徑）
+- 挑選頁面後的連續編號輸出
+- WPF 介面在真實螢幕上的操作
+- Inno Setup 安裝程式的安裝與啟動
+
+**仍未實機驗證的環境／情境**：
+
+- Windows 11、Windows 10 32-bit、ARM64
+- 轉檔時 PowerPoint 正開著的「借用執行個體」路徑（1.0.1 的重點修正）
+- LibreOffice 後備路徑（測試機未安裝；已在 Linux 容器完整驗證）
+- PowerPoint 與 LibreOffice 都沒有的機器
+- 32 位元 Office（x64 應用程式跨位元自動化 32 位元 Office，理論上可行但未實測）
+- 受密碼保護、含巨集、毀損的簡報
+- 超長路徑與網路磁碟機路徑
+- 解除安裝流程與右鍵選單
+
+**尚未在容器環境驗證的部分**（需要實體 Windows 機器）：
 
 - PowerPoint COM 路徑：邏輯已完成且錯誤處理與 LibreOffice 路徑共用同一套流程，但容器內沒有 Office 可實測。首次在有 PowerPoint 的機器上使用時建議先用單一檔案試跑。
 - WPF 視窗的實際外觀與互動：XAML 已通過編譯器驗證、所有按鈕都已接上命令，但未在真實螢幕上目視確認。
@@ -441,20 +573,58 @@ Write-Ok "$($_.FullName)嚗?([math]::Round(...
 
 四個檔案均已加上 UTF-8 BOM 並統一為 CRLF。`.bat` 維持不含 BOM（cmd.exe 會把 BOM 當成指令的一部分）。新增 `BuildScriptEncodingTests` 自動驗證這些規則，避免日後編輯時再次發生。
 
-另修正 `publish-portable.ps1` 組裝 `dotnet publish` 參數的錯誤。原本寫成：
+### 1.2.0
 
-```powershell
-$publishArgs = @(
-    ...
-    '-p:PublishSingleFile=' + $SingleFile.ToString().ToLower(),
-    ...
-)
-```
+一次處理外部程式碼審查提出的九個問題（另有一項「50 頁上限未實作」經查證為不存在的需求，未採納）。
 
-在陣列常值中，PowerShell 的逗號運算子優先順序**高於** `+`，因此上式被解讀成「前面那段陣列 **+** 一個元素」，實際產生 `-p:PublishSingleFile=` 與 `true` 兩個獨立參數。MSBuild 收到多出來的 `true` 當成第二個專案路徑，回報：
+**安全性**
 
-```
-MSBUILD : error MSB1008: 只能指定一個專案。
-```
+1. **開啟簡報前一律停用巨集。** `Application.AutomationSecurity` 在 1.0.1 改寫工作階段邏輯時被遺漏（1.0.0 原本有）。Office 自動化的預設值是「直接執行巨集」，使用者拖入的 `.ppt` / `.pps` 可能夾帶巨集。現已在開檔前設為 `msoAutomationSecurityForceDisable`，並在結束時還原原值；還原邏輯抽成 `OfficeSettingsGuard`，有 8 個單元測試涵蓋。
 
-已改用字串內插 `"-p:PublishSingleFile=$($SingleFile.ToString().ToLower())"`。
+2. **不再依程序名稱掃描殺除。** 舊的 `ProcessGuard` 用「轉檔前後 PID 差集」判斷殘留程序，使用者若在轉檔途中才開啟 PowerPoint 或 LibreOffice 也會被關掉，先前註解宣稱的「絕不誤殺」並不成立。現改為：LibreOffice 以 Windows **Job Object** 綁定整棵程序樹；PowerPoint 由 `Application.HWND` 反查 PID 後只管理該執行個體。`ProcessGuard` 已刪除，取代為只處理明確登記 PID 的 `OwnedProcessGuard`。
+
+**正確性**
+
+3. **引擎不可用時停用開始按鈕。** 選「只用 PowerPoint」但機器只有 LibreOffice 時，舊版仍可按下開始並整批失敗。新增 `EngineAvailability` 作為單一判斷來源，介面與 `BatchExportService` 共用，訊息一致。
+
+4. **挑頁模式不再靜默輸出整份簡報。** 舊版只要「其中一份」挑過頁面就能開始，其餘未挑選的會退回輸出全部頁面。現在要求每一份已勾選的簡報都必須挑過，並在訊息中列出還缺哪幾份。
+
+5. **後備引擎的輸出完全隔離。** 每個引擎輸出到自己的暫存資料夾，成功後才搬到正式位置。先前若半成品刪除失敗，第二個引擎會寫進同一個資料夾。取消時已完成的圖片會保留。
+
+6. **縮圖快取鍵加入引擎與程式版本。** 先前只用路徑、時間、大小、寬度，LibreOffice 產生的縮圖可能被 PowerPoint 模式沿用，造成預覽與正式輸出不一致。
+
+7. **拖入大型資料夾不再凍結介面。** 掃描改到背景執行緒，並明確指定 `IgnoreInaccessible = true` —— `Directory.EnumerateFiles` 的 `SearchOption` 多載走相容性設定，遇到沒有權限的子資料夾會擲出例外並中斷整個掃描，使用者會靜默地什麼都掃不到。同時加上單次 2000 份的上限與略過數回報。
+
+**一致性**
+
+8. **資訊清單只宣告實際支援的系統。** 移除 Windows 7 / 8 / 8.1 / Vista 的相容性 GUID，只保留涵蓋 Windows 10 與 11 的那一個。
+
+9. **版本號只在一個地方定義。** `installer.iss` 不再寫死版本，改由建置腳本從 `Directory.Build.props` 讀出後以 `/DAppVersion` 傳入；免安裝版 ZIP 的檔名也會自動帶入版本號。
+
+**建置腳本**
+
+批次檔改為**純 ASCII 且檔名也是 ASCII**（`build-installer.bat`、`build-portable.bat`），所有中文訊息交由 PowerShell 輸出。這是繼 1.1.1 的 BOM 問題之後的根本性防護：批次檔完全不含非 ASCII 位元組，就不可能有編碼問題。新增測試驗證這項規則、`.ps1` / `.iss` 的 BOM、以及批次檔指向的腳本確實存在。
+
+### 1.3.0
+
+新增自動更新功能。
+
+1. **程式內更新。** 啟動時（每 20 小時最多一次）與手動按鈕都可以向 GitHub Releases 查詢新版本。免安裝版以「改名替換」方式就地更新並自動重啟；安裝版則下載安裝程式並靜默執行。
+
+2. **更新檔一律驗證 SHA-256。** 雜湊來自隨發行上傳的 `update-manifest.json`。驗證失敗立即中止，不會動到執行檔。沒有清單的發行（更早的版本）會被視為必須手動下載。
+
+3. **重大變更可以擋下自動更新。** 發行時加 `-MajorChange` 會在清單標記 `requiresManualDownload`；也可以用 `-MinimumInAppUpdateFrom` 指定太舊的版本必須手動重裝。
+
+4. **更新來源可設定。** `update.config.json` 隨執行檔一起發佈，換儲存庫或關閉自動檢查都不必重新編譯。免安裝版只發佈單一 .exe，使用者手上不會有這個設定檔，因此 `UpdateConfiguration` 編譯進去的預設值才是實際生效的來源，兩邊都要填。`內建的預設儲存庫必須是可用的` 這個測試會擋下把佔位字串發出去。
+
+5. **新增 `build-release.bat` / `publish-release.ps1`**：一次產生免安裝版、安裝程式與更新清單，並列出上傳到 GitHub 的步驟。
+
+6. **免安裝版改為直接發佈單一 .exe，不再包 ZIP。** 本來就是自帶執行階段的單一檔案，多包一層只是讓使用者多一個步驟。`PortableUpdateInstaller.ResolveExecutable` 因此同時支援 `.exe` 與 `.zip`——舊版發行的是 ZIP，那批使用者仍要能更新上來。
+
+7. **發行檔名一律 ASCII。** GitHub 上傳 Release 附件時會把非 ASCII 字元換成句點，`PPT-PNG-匯出工具-安裝程式-1.3.0.exe` 會變成 `PPT-PNG-.-.-1.3.0.exe`。自動更新是拿清單裡的 `fileName` 去比對附件名稱，一旦被改名就找不到下載網址，更新會停在「這個更新檔沒有可用的下載網址」。
+
+8. **修正 `publish-release.ps1` 產不出更新清單的問題。** `New-AssetEntry` 用 `Test-Path $file` 檢查存在，但 Windows PowerShell 5.1 把 `Get-ChildItem` 回傳的 `FileInfo` 轉成字串時只會得到檔名，等於拿相對路徑去比對目前工作目錄。除非剛好站在 `artifacts` 底下執行，否則兩個資產都會被判定為不存在，腳本以「找不到任何可發行的檔案」結束——`update-manifest.json` 從來沒有成功產生過。已改為以 `FullName` 判斷。
+
+9. **修正 `publish-portable.ps1` 的 `dotnet publish` 參數組裝。** 陣列常值中逗號的優先順序高於 `+`，`'-p:PublishSingleFile=' + $x` 會被拆成兩個參數，MSBuild 回報 `MSB1008: 只能指定一個專案`。已改用字串內插。
+
+10. **`InstallationInfo.Detect` 取不出執行檔名稱時改判為開發建置。** 原本只在名稱為 `dotnet` 時判定開發建置，空字串會落到免安裝版分支。對應的測試本來傳 `null`（意思是「沿用目前程序」），結果取決於測試主機叫 `dotnet.exe` 還是 `testhost.exe`，換機器就會紅；已改成傳空字串，測的是真正想測的分支。

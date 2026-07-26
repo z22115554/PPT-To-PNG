@@ -7,6 +7,8 @@ using PptPngExporter.Core.Converters;
 using PptPngExporter.Core.Models;
 using PptPngExporter.Core.Parsing;
 using PptPngExporter.Core.Services;
+using PptPngExporter.Core.Updates;
+using System.Threading.Tasks;
 
 namespace PptPngExporter.App.ViewModels;
 
@@ -16,6 +18,8 @@ public sealed class MainViewModel : ObservableObject
     private readonly AppSettings _settings;
     private readonly PowerPointConverter _powerPoint;
     private readonly LibreOfficeConverter _libreOffice;
+    private readonly UpdateService _updates;
+    private readonly UpdateConfiguration _updateConfig;
 
     private CancellationTokenSource? _cts;
 
@@ -44,6 +48,9 @@ public sealed class MainViewModel : ObservableObject
         _powerPoint = new PowerPointConverter(logger);
         _libreOffice = new LibreOfficeConverter(logger);
 
+        _updateConfig = UpdateConfiguration.Load();
+        _updates = new UpdateService(new GitHubReleaseSource(_updateConfig, logger), _updateConfig, logger);
+
         Files.CollectionChanged += OnFilesChanged;
 
         AddFilesCommand = new RelayCommand(AddFiles, () => !IsBusy);
@@ -60,6 +67,10 @@ public sealed class MainViewModel : ObservableObject
         RecheckEnginesCommand = new RelayCommand(RecheckEngines, () => !IsBusy);
         DownloadLibreOfficeCommand = new RelayCommand(() => Shell.OpenUrl(LibreOfficeDownloadUrl));
         OpenPagePickerCommand = new RelayCommand(OpenPagePicker, () => !IsBusy && Files.Any(f => f.IsSelected));
+        CheckForUpdatesCommand = new RelayCommand(() => _ = CheckForUpdatesAsync(manual: true), () => !IsCheckingUpdate && !IsDownloadingUpdate);
+        InstallUpdateCommand = new RelayCommand(() => _ = InstallUpdateAsync(), () => CanInstallUpdate);
+        OpenReleasePageCommand = new RelayCommand(OpenReleasePage);
+        DismissUpdateCommand = new RelayCommand(DismissUpdate);
 
         RestoreSettings();
         RefreshEngineStatus();
@@ -83,6 +94,13 @@ public sealed class MainViewModel : ObservableObject
     public RelayCommand RecheckEnginesCommand { get; }
     public RelayCommand DownloadLibreOfficeCommand { get; }
     public RelayCommand OpenPagePickerCommand { get; }
+    public RelayCommand CheckForUpdatesCommand { get; }
+    public RelayCommand InstallUpdateCommand { get; }
+    public RelayCommand OpenReleasePageCommand { get; }
+    public RelayCommand DismissUpdateCommand { get; }
+
+    /// <summary>更新完成、需要結束程式讓新版接手。</summary>
+    public event EventHandler? ExitRequested;
 
     /// <summary>要求檢視層開啟縮圖挑選視窗（ViewModel 不直接持有 Window）。</summary>
     public event EventHandler<IReadOnlyList<PresentationItem>>? PagePickerRequested;
@@ -106,7 +124,7 @@ public sealed class MainViewModel : ObservableObject
         }
     }
 
-    public bool IsIdle => !_isBusy;
+    public bool IsIdle => !_isBusy && !_isScanning;
 
     public bool HasFiles => Files.Count > 0;
 
@@ -354,62 +372,88 @@ public sealed class MainViewModel : ObservableObject
             Filter = "PowerPoint 簡報 (*.pptx;*.ppt;*.ppsx;*.pps)|*.pptx;*.ppt;*.ppsx;*.pps|所有檔案 (*.*)|*.*"
         };
 
-        if (dialog.ShowDialog() == true) AddPaths(dialog.FileNames);
+        if (dialog.ShowDialog() == true) _ = AddPathsAsync(dialog.FileNames);
     }
 
-    /// <summary>加入檔案或整個資料夾（拖放時會用到）。回傳實際加入的數量。</summary>
-    public int AddPaths(IEnumerable<string> paths)
-    {
-        var expanded = new List<string>();
+    private bool _isScanning;
 
-        foreach (var path in paths)
+    /// <summary>正在掃描資料夾。掃描期間不讓使用者開始轉換。</summary>
+    public bool IsScanning
+    {
+        get => _isScanning;
+        private set
         {
-            try
-            {
-                if (Directory.Exists(path))
-                {
-                    expanded.AddRange(Directory
-                        .EnumerateFiles(path, "*", SearchOption.AllDirectories)
-                        .Where(BatchExportService.IsSupported));
-                }
-                else if (File.Exists(path) && BatchExportService.IsSupported(path))
-                {
-                    expanded.Add(path);
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.Warn($"讀取 {path} 時發生問題：{ex.Message}");
-            }
+            if (!SetProperty(ref _isScanning, value)) return;
+            OnPropertyChanged(nameof(IsIdle));
+            RaiseCommandStates();
+        }
+    }
+
+    /// <summary>
+    /// 加入檔案或整個資料夾（拖放時會用到）。
+    ///
+    /// 掃描一律在背景執行緒進行：拖入大型或網路資料夾時，同步遞迴會讓整個介面凍住。
+    /// </summary>
+    public async Task<int> AddPathsAsync(IEnumerable<string> paths)
+    {
+        var list = paths.ToList();
+        if (list.Count == 0) return 0;
+
+        IsScanning = true;
+        StatusMessage = "正在尋找簡報…";
+
+        ScanResult scan;
+        try
+        {
+            scan = await Task.Run(() => PresentationScanner.Scan(
+                list, PresentationScanner.DefaultMaxFiles, CancellationToken.None, _logger));
+        }
+        catch (Exception ex)
+        {
+            _logger.Error("掃描檔案時發生錯誤。", ex);
+            StatusMessage = "掃描檔案時發生問題：" + ex.Message;
+            return 0;
+        }
+        finally
+        {
+            IsScanning = false;
         }
 
         var existing = Files.Select(f => f.FullPath).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var added = 0;
 
-        foreach (var file in expanded.OrderBy(f => f, StringComparer.CurrentCulture))
+        foreach (var file in scan.Files)
         {
-            var full = Path.GetFullPath(file);
-            if (!existing.Add(full)) continue;
+            if (!existing.Add(file)) continue;
 
-            var item = new PresentationItem(full);
+            var item = new PresentationItem(file);
             item.PropertyChanged += OnItemPropertyChanged;
             Files.Add(item);
             added++;
         }
 
+        var notes = new List<string>();
         if (added > 0)
         {
             HasFinished = false;
-            StatusMessage = $"已加入 {added} 份簡報。";
+            notes.Add($"已加入 {added} 份簡報");
         }
-        else if (expanded.Count > 0)
+        else if (scan.Files.Count > 0)
         {
-            StatusMessage = "這些簡報都已經在清單中了。";
+            notes.Add("這些簡報都已經在清單中了");
         }
         else
         {
-            StatusMessage = "沒有找到支援的簡報檔（.ppt、.pptx、.pps、.ppsx）。";
+            notes.Add("沒有找到支援的簡報檔（.ppt、.pptx、.pps、.ppsx）");
         }
+
+        if (scan.ReachedLimit)
+            notes.Add($"已達單次加入上限 {PresentationScanner.DefaultMaxFiles} 份，其餘未加入");
+        if (scan.SkippedDirectories > 0)
+            notes.Add($"有 {scan.SkippedDirectories} 個位置無法讀取而略過");
+
+        StatusMessage = string.Join("；", notes) + "。";
+        ValidatePageRange();
 
         return added;
     }
@@ -446,6 +490,7 @@ public sealed class MainViewModel : ObservableObject
         OnPropertyChanged(nameof(SelectedCount));
         OnPropertyChanged(nameof(FileCountText));
         OnPropertyChanged(nameof(PickedSummary));
+        ValidatePageRange();
         RaiseCommandStates();
     }
 
@@ -455,6 +500,7 @@ public sealed class MainViewModel : ObservableObject
         OnPropertyChanged(nameof(SelectedCount));
         OnPropertyChanged(nameof(FileCountText));
         OnPropertyChanged(nameof(PickedSummary));
+        ValidatePageRange();
         RaiseCommandStates();
     }
 
@@ -498,9 +544,24 @@ public sealed class MainViewModel : ObservableObject
         }
         else if (UsePickedPages)
         {
-            PageRangeError = Files.Any(f => f.IsSelected && f.HasPageSelection)
-                ? null
-                : "請先按「開啟縮圖挑選頁面」挑選至少一頁。";
+            // 只要有任何一份勾選的簡報沒挑過頁面就擋下來。
+            // 舊版只檢查「至少一份有挑」，其餘沒挑過的會靜默輸出全部頁面。
+            var missing = Files.Where(f => f.IsSelected && !f.HasPageSelection).ToList();
+
+            if (Files.All(f => !f.IsSelected))
+            {
+                PageRangeError = "請先在左側勾選要處理的簡報。";
+            }
+            else if (missing.Count == 0)
+            {
+                PageRangeError = null;
+            }
+            else
+            {
+                var names = string.Join("、", missing.Take(3).Select(f => f.FileName));
+                var more = missing.Count > 3 ? $" 等 {missing.Count} 份" : string.Empty;
+                PageRangeError = $"還沒挑選頁面：{names}{more}。請按「開啟縮圖挑選頁面」補齊，或取消勾選這些簡報。";
+            }
         }
         else if (string.IsNullOrWhiteSpace(PageRangeText))
         {
@@ -579,10 +640,19 @@ public sealed class MainViewModel : ObservableObject
 
     private bool CanStart()
         => !IsBusy
+           && !IsScanning
            && SelectedCount > 0
            && PageRangeError is null
            && ImageWidthError is null
+           && EngineBlocker is null
            && !string.IsNullOrWhiteSpace(OutputFolder);
+
+    /// <summary>
+    /// 目前的引擎設定為什麼不能開始；可以開始時為 null。
+    /// 與 BatchExportService 共用 EngineAvailability 的規則，
+    /// 避免出現「按鈕可以按，但每個檔案都失敗」。
+    /// </summary>
+    public string? EngineBlocker { get; private set; }
 
     private void RefreshEngineStatus()
     {
@@ -606,10 +676,13 @@ public sealed class MainViewModel : ObservableObject
         };
 
         NoEngineAvailable = !hasPowerPoint && !hasLibreOffice;
+        EngineBlocker = EngineAvailability.DescribeBlocker(EnginePreference, hasPowerPoint, hasLibreOffice);
 
         OnPropertyChanged(nameof(EngineStatusText));
         OnPropertyChanged(nameof(EngineStatusIsWarning));
         OnPropertyChanged(nameof(NoEngineAvailable));
+        OnPropertyChanged(nameof(EngineBlocker));
+        StartCommand.RaiseCanExecuteChanged();
     }
 
     #endregion
@@ -661,13 +734,12 @@ public sealed class MainViewModel : ObservableObject
             NumberDigits = NumberDigits
         };
 
-        // 挑選模式下，每份簡報帶自己的頁碼；沒挑過的簡報則輸出全部頁面
+        // 挑選模式下每份簡報都必須有明確頁碼（CanStart 已擋掉沒挑過的情況），
+        // 絕不讓沒挑過的簡報靜默輸出全部頁面。
         var jobs = targets.Select(t => new ExportJob
         {
             SourcePath = t.FullPath,
-            Pages = UsePickedPages && t.SelectedPages is { Count: > 0 }
-                ? PageRangeSpec.FromPages(t.SelectedPages)
-                : null
+            Pages = UsePickedPages ? PageRangeSpec.FromPages(t.SelectedPages ?? new HashSet<int>()) : null
         }).ToList();
 
         SaveSettings();
@@ -828,6 +900,174 @@ public sealed class MainViewModel : ObservableObject
 
     #endregion
 
+    #region 軟體更新
+
+    private UpdateCheckResult? _update;
+    private bool _isCheckingUpdate;
+    private bool _isDownloadingUpdate;
+    private double _updateProgress;
+    private string _updateMessage = string.Empty;
+
+    public bool IsCheckingUpdate
+    {
+        get => _isCheckingUpdate;
+        private set { if (SetProperty(ref _isCheckingUpdate, value)) RaiseUpdateCommands(); }
+    }
+
+    public bool IsDownloadingUpdate
+    {
+        get => _isDownloadingUpdate;
+        private set { if (SetProperty(ref _isDownloadingUpdate, value)) RaiseUpdateCommands(); }
+    }
+
+    public double UpdateProgress
+    {
+        get => _updateProgress;
+        private set => SetProperty(ref _updateProgress, value);
+    }
+
+    public string UpdateMessage
+    {
+        get => _updateMessage;
+        private set => SetProperty(ref _updateMessage, value);
+    }
+
+    /// <summary>有更新可用，且橫幅還沒被使用者關掉。</summary>
+    public bool HasUpdateBanner => _update?.HasUpdate == true && !string.IsNullOrEmpty(UpdateMessage);
+
+    /// <summary>可以直接在程式內更新（而不是要手動下載）。</summary>
+    public bool CanInstallUpdate =>
+        _update?.Availability == UpdateAvailability.CanUpdateInApp && !IsDownloadingUpdate && !IsBusy;
+
+    /// <summary>需要手動下載。</summary>
+    public bool RequiresManualDownload => _update?.Availability == UpdateAvailability.ManualDownloadRequired;
+
+    public string InstallationDescription => InstallationInfo.Describe(_updates.Installation);
+
+    /// <summary>啟動時的自動檢查。會遵守間隔設定與使用者略過的版本。</summary>
+    public async Task CheckForUpdatesOnStartupAsync()
+    {
+        if (!_settings.AutoCheckUpdates || !_updateConfig.CheckOnStartup) return;
+        if (!_updateConfig.IsConfigured) return;
+
+        var last = _settings.LastUpdateCheckUtc;
+        if (last is not null && DateTime.UtcNow - last.Value < TimeSpan.FromHours(_updateConfig.MinimumHoursBetweenChecks))
+            return;
+
+        await CheckForUpdatesAsync(manual: false);
+    }
+
+    public async Task CheckForUpdatesAsync(bool manual)
+    {
+        if (IsCheckingUpdate || IsDownloadingUpdate) return;
+
+        IsCheckingUpdate = true;
+        if (manual) UpdateMessage = "正在檢查更新…";
+
+        try
+        {
+            var result = await _updates.CheckAsync();
+            _update = result;
+
+            _settings.LastUpdateCheckUtc = DateTime.UtcNow;
+            _settings.Save();
+
+            if (result.Availability == UpdateAvailability.CheckFailed)
+            {
+                UpdateMessage = manual ? result.Message : string.Empty;
+            }
+            else if (!result.HasUpdate)
+            {
+                UpdateMessage = manual ? result.Message : string.Empty;
+            }
+            else if (!manual && string.Equals(_settings.SkippedVersion, result.LatestVersion.ToString(), StringComparison.Ordinal))
+            {
+                // 使用者已經說過這一版不用提醒
+                UpdateMessage = string.Empty;
+            }
+            else
+            {
+                UpdateMessage = result.Message;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.Error("檢查更新時發生未預期的錯誤。", ex);
+            if (manual) UpdateMessage = "檢查更新時發生問題：" + ex.Message;
+        }
+        finally
+        {
+            IsCheckingUpdate = false;
+            RaiseUpdateCommands();
+        }
+    }
+
+    private async Task InstallUpdateAsync()
+    {
+        if (_update is null || !CanInstallUpdate) return;
+
+        IsDownloadingUpdate = true;
+        UpdateProgress = 0;
+        UpdateMessage = $"正在下載 {_update.LatestVersion}…";
+
+        try
+        {
+            var progress = new Progress<double>(p =>
+            {
+                UpdateProgress = p;
+                UpdateMessage = $"正在下載 {_update.LatestVersion}…{p:0}%";
+            });
+
+            var result = await _updates.DownloadAndApplyAsync(_update, progress);
+            UpdateMessage = result.Message;
+
+            if (result.ShouldExitNow)
+            {
+                SaveSettings();
+                ExitRequested?.Invoke(this, EventArgs.Empty);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.Error("更新失敗。", ex);
+            UpdateMessage = "更新失敗：" + ex.Message;
+        }
+        finally
+        {
+            IsDownloadingUpdate = false;
+            RaiseUpdateCommands();
+        }
+    }
+
+    private void OpenReleasePage()
+    {
+        var url = _update?.ReleaseUrl ?? _updateConfig.ReleasesPageUrl;
+        Shell.OpenUrl(url);
+    }
+
+    private void DismissUpdate()
+    {
+        if (_update?.HasUpdate == true)
+        {
+            _settings.SkippedVersion = _update.LatestVersion.ToString();
+            _settings.Save();
+        }
+
+        UpdateMessage = string.Empty;
+        RaiseUpdateCommands();
+    }
+
+    private void RaiseUpdateCommands()
+    {
+        OnPropertyChanged(nameof(HasUpdateBanner));
+        OnPropertyChanged(nameof(CanInstallUpdate));
+        OnPropertyChanged(nameof(RequiresManualDownload));
+        CheckForUpdatesCommand.RaiseCanExecuteChanged();
+        InstallUpdateCommand.RaiseCanExecuteChanged();
+    }
+
+    #endregion
+
     private void RaiseCommandStates()
     {
         AddFilesCommand.RaiseCanExecuteChanged();
@@ -841,6 +1081,7 @@ public sealed class MainViewModel : ObservableObject
         OpenOutputCommand.RaiseCanExecuteChanged();
         RecheckEnginesCommand.RaiseCanExecuteChanged();
         OpenPagePickerCommand.RaiseCanExecuteChanged();
+        RaiseUpdateCommands();
     }
 }
 

@@ -51,16 +51,23 @@ public sealed class SlidePreviewService
         if (!File.Exists(LongPath.Extended(fullPath)))
             throw new ConversionException("找不到這個檔案，可能已被移動、改名或刪除。");
 
-        var cacheDir = Path.Combine(CacheRoot, BuildCacheKey(fullPath, thumbnailWidth));
+        var candidates = Order(preference).Where(c => c.IsAvailable()).ToList();
 
-        if (TryReadCache(cacheDir) is { Count: > 0 } cached)
+        // 快取鍵包含產生縮圖的引擎：PowerPoint 與 LibreOffice 的算繪結果不同，
+        // 不能讓 LibreOffice 產生的縮圖被 PowerPoint 模式沿用，否則預覽會與正式輸出不一致。
+        foreach (var converter in candidates)
         {
-            _logger.Info($"使用既有的縮圖快取：{Path.GetFileName(fullPath)}（{cached.Count} 張）");
-            return new SlidePreview { SourcePath = fullPath, ThumbnailPaths = cached };
+            var dir = Path.Combine(CacheRoot, BuildCacheKey(fullPath, thumbnailWidth, converter.Engine));
+            if (TryReadCache(dir) is { Count: > 0 } cached)
+            {
+                _logger.Info($"使用既有的縮圖快取：{Path.GetFileName(fullPath)}（{cached.Count} 張，{converter.DisplayName}）");
+                return new SlidePreview { SourcePath = fullPath, ThumbnailPaths = cached };
+            }
         }
 
         // 先產生到暫存位置，全部成功後才搬到快取，避免中途取消留下半套縮圖
-        var staging = cacheDir + ".tmp-" + Guid.NewGuid().ToString("N")[..8];
+        Directory.CreateDirectory(CacheRoot);
+        var staging = Path.Combine(CacheRoot, "tmp-" + Guid.NewGuid().ToString("N")[..10]);
         TryDelete(staging);
         Directory.CreateDirectory(staging);
 
@@ -95,7 +102,8 @@ public sealed class SlidePreviewService
                     var produced = converter.Convert(request, null, cancellationToken);
                     if (produced.Count == 0) throw new ConversionException("這份簡報沒有任何投影片。");
 
-                    Directory.CreateDirectory(CacheRoot);
+                    // 用「實際成功的引擎」當作快取鍵，後備轉換的結果才不會被誤認成主引擎的
+                    var cacheDir = Path.Combine(CacheRoot, BuildCacheKey(fullPath, thumbnailWidth, converter.Engine));
                     TryDelete(cacheDir);
                     Directory.Move(staging, cacheDir);
 
@@ -144,14 +152,8 @@ public sealed class SlidePreviewService
         }
     }
 
-    private IReadOnlyList<ISlideConverter> Order(EnginePreference preference) => preference switch
-    {
-        EnginePreference.PowerPointOnly => _converters.Where(c => c.Engine == ConversionEngine.PowerPoint).ToList(),
-        EnginePreference.LibreOfficeOnly => _converters.Where(c => c.Engine == ConversionEngine.LibreOffice).ToList(),
-        _ => _converters
-            .OrderBy(c => c.Engine == ConversionEngine.PowerPoint ? 0 : c.Engine == ConversionEngine.LibreOffice ? 1 : 2)
-            .ToList()
-    };
+    private IReadOnlyList<ISlideConverter> Order(EnginePreference preference)
+        => EngineAvailability.Order(_converters, preference);
 
     private static IReadOnlyList<string>? TryReadCache(string cacheDir)
     {
@@ -171,13 +173,27 @@ public sealed class SlidePreviewService
         }
     }
 
-    private static string BuildCacheKey(string fullPath, int width)
+    /// <summary>
+    /// 快取鍵。除了檔案本身與寬度，還包含<b>產生縮圖的引擎</b>與<b>程式版本</b>：
+    /// 換引擎或改版導致算繪結果不同時，舊快取必須自動失效。
+    /// </summary>
+    private static string BuildCacheKey(string fullPath, int width, ConversionEngine engine)
     {
         var info = new FileInfo(fullPath);
-        var raw = $"{fullPath.ToLowerInvariant()}|{info.LastWriteTimeUtc.Ticks}|{info.Length}|{width}";
+        var raw = string.Join('|',
+            fullPath.ToLowerInvariant(),
+            info.LastWriteTimeUtc.Ticks,
+            info.Length,
+            width,
+            engine,
+            AppVersion);
+
         var hash = SHA256.HashData(Encoding.UTF8.GetBytes(raw));
-        return Convert.ToHexString(hash)[..24];
+        return $"{engine.ToString().ToLowerInvariant()}-{Convert.ToHexString(hash)[..20]}";
     }
+
+    private static string AppVersion { get; } =
+        typeof(SlidePreviewService).Assembly.GetName().Version?.ToString() ?? "0.0.0.0";
 
     private static void TryDelete(string directory)
     {

@@ -34,6 +34,7 @@ $project   = Join-Path $repoRoot 'src\PptPngExporter.App\PptPngExporter.App.cspr
 $solution  = Join-Path $repoRoot 'PptPngExporter.sln'
 $payload   = Join-Path $repoRoot 'artifacts\installer-payload'
 $issScript = Join-Path $PSScriptRoot 'installer.iss'
+$propsFile = Join-Path $repoRoot 'Directory.Build.props'
 
 # ---------------------------------------------------------------- 環境檢查
 
@@ -61,6 +62,18 @@ if (-not ($sdks | Where-Object { $_ -match '^8\.' })) {
     exit 1
 }
 Write-Ok ".NET SDK 正常（$(($sdks | Where-Object { $_ -match '^8\.' } | Select-Object -First 1))）"
+
+# 版本號的唯一來源是 Directory.Build.props
+$appVersion = $null
+try {
+    $appVersion = ([xml](Get-Content $propsFile -Raw)).Project.PropertyGroup.Version | Where-Object { $_ } | Select-Object -First 1
+} catch { }
+
+if (-not $appVersion) {
+    Write-Bad "無法從 $propsFile 讀出 <Version>。"
+    exit 1
+}
+Write-Ok "版本號 $appVersion（來自 Directory.Build.props）"
 
 # 找 Inno Setup：先查登錄檔，再查常見安裝路徑
 function Find-InnoSetup {
@@ -160,7 +173,7 @@ Write-Step '編譯安裝程式'
 # Inno Setup 沒有內建繁體中文語系檔。若使用者已自行放入，就切換成中文介面。
 $isccDir = Split-Path -Parent $iscc
 $chineseIsl = Join-Path $isccDir 'Languages\ChineseTraditional.isl'
-$isccArgs = @($issScript)
+$isccArgs = @("/DAppVersion=$appVersion", $issScript)
 
 if (Test-Path $chineseIsl) {
     Write-Ok '偵測到繁體中文語系檔，安裝程式介面將使用繁體中文'

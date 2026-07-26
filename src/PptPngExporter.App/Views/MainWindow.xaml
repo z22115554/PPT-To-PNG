@@ -21,6 +21,7 @@
     <Grid Margin="18,16,18,0">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
@@ -51,14 +52,54 @@
                            Style="{StaticResource HintText}" Margin="0,2,0,0" />
             </StackPanel>
 
-            <Button Grid.Column="2" Content="轉換記錄" Style="{StaticResource GhostButton}"
-                    VerticalAlignment="Center"
-                    Command="{Binding OpenLogCommand}"
-                    ToolTip="開啟記錄檔資料夾，回報問題時可以一併提供" />
+            <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                <Button Content="檢查更新" Style="{StaticResource GhostButton}"
+                        Command="{Binding CheckForUpdatesCommand}"
+                        ToolTip="向 GitHub 查詢是否有新版本" />
+                <Button Content="轉換記錄" Style="{StaticResource GhostButton}"
+                        Command="{Binding OpenLogCommand}"
+                        ToolTip="開啟記錄檔資料夾，回報問題時可以一併提供" />
+            </StackPanel>
         </Grid>
 
+
+        <!-- 軟體更新橫幅 -->
+        <Border Grid.Row="1" Margin="2,0,2,12" Padding="14,11" CornerRadius="9"
+                Background="{StaticResource AccentSoftBrush}"
+                BorderBrush="{StaticResource AccentBrush}" BorderThickness="1"
+                Visibility="{Binding HasUpdateBanner, Converter={StaticResource BoolToVis}}">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                    <TextBlock Text="{Binding UpdateMessage}" FontSize="13" FontWeight="SemiBold"
+                               Foreground="{StaticResource InkBrush}" TextWrapping="Wrap" />
+                    <ProgressBar Style="{StaticResource AppProgressBar}" Margin="0,8,12,0"
+                                 Minimum="0" Maximum="100" Value="{Binding UpdateProgress, Mode=OneWay}"
+                                 Visibility="{Binding IsDownloadingUpdate, Converter={StaticResource BoolToVis}}" />
+                    <TextBlock Style="{StaticResource HintText}" Margin="0,6,0,0"
+                               Text="這個版本有較大的變更，請點「查看說明」下載安裝。"
+                               Visibility="{Binding RequiresManualDownload, Converter={StaticResource BoolToVis}}" />
+                </StackPanel>
+
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button Content="查看說明" Style="{StaticResource GhostButton}"
+                            Command="{Binding OpenReleasePageCommand}" />
+                    <Button Content="立即更新" Style="{StaticResource PrimaryButton}" Margin="8,0,0,0"
+                            Padding="18,8" FontSize="13"
+                            Command="{Binding InstallUpdateCommand}"
+                            Visibility="{Binding CanInstallUpdate, Converter={StaticResource BoolToVis}}" />
+                    <Button Content="略過此版" Style="{StaticResource GhostButton}" Margin="4,0,0,0"
+                            Command="{Binding DismissUpdateCommand}"
+                            IsEnabled="{Binding IsDownloadingUpdate, Converter={StaticResource InvBool}}" />
+                </StackPanel>
+            </Grid>
+        </Border>
         <!-- ==================== 主要內容 ==================== -->
-        <Grid Grid.Row="1">
+        <Grid Grid.Row="2">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="384" />
@@ -357,7 +398,7 @@
         </Grid>
 
         <!-- ==================== 底部動作列 ==================== -->
-        <Border Grid.Row="2" Margin="0,14,0,0" Padding="18,14"
+        <Border Grid.Row="3" Margin="0,14,0,0" Padding="18,14"
                 Background="{StaticResource SurfaceBrush}"
                 BorderBrush="{StaticResource BorderBrush2}" BorderThickness="1"
                 CornerRadius="10,10,0,0">
@@ -392,6 +433,18 @@
                         <TextBlock Style="{StaticResource HintText}"
                                    Text="失敗的檔案不會影響其他檔案，錯誤原因會顯示在清單裡。"
                                    Visibility="{Binding LastRunHadFailures, Converter={StaticResource BoolToVis}}" />
+
+                        <TextBlock Style="{StaticResource ErrorText}" Margin="0,2,0,0"
+                                   Text="{Binding EngineBlocker}"
+                                   Visibility="{Binding EngineBlocker, Converter={StaticResource NotEmptyToVis}}" />
+
+                        <TextBlock Style="{StaticResource ErrorText}" Margin="0,2,0,0"
+                                   Text="{Binding PageRangeError}"
+                                   Visibility="{Binding PageRangeError, Converter={StaticResource NotEmptyToVis}}" />
+
+                        <TextBlock Style="{StaticResource HintText}" Margin="0,2,0,0"
+                                   Text="正在尋找簡報，請稍候…"
+                                   Visibility="{Binding IsScanning, Converter={StaticResource BoolToVis}}" />
                     </StackPanel>
 
                     <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">

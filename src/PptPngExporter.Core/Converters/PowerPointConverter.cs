@@ -5,28 +5,24 @@ using PptPngExporter.Core.Interop;
 using PptPngExporter.Core.IO;
 using PptPngExporter.Core.Models;
 using PptPngExporter.Core.Services;
+using static PptPngExporter.Core.Converters.PowerPointConstants;
 
 namespace PptPngExporter.Core.Converters;
 
 /// <summary>
-/// 透過 COM 自動化呼叫本機 PowerPoint 匯出投影片。還原度最高（字型、SmartArt、圖表皆與 PowerPoint 一致）。
-/// 必須在 STA 執行緒上呼叫。
+/// 透過 COM 自動化呼叫本機 PowerPoint 匯出投影片。還原度最高。必須在 STA 執行緒上呼叫。
 ///
-/// 重要行為：如果使用者已經開著 PowerPoint，本類別會「借用」該執行個體，
-/// 結束時<b>不會</b>關閉它，也不會關閉使用者原本就開著的簡報。
+/// 三個安全性／穩定性要點：
+/// 1. 開檔前一律把 AutomationSecurity 設為 ForceDisable，避免簡報夾帶的巨集被執行。
+///    Office 自動化的預設是 msoAutomationSecurityLow，也就是「直接執行巨集」。
+/// 2. 使用者已開著 PowerPoint 時只借用，結束時不關閉，並還原改動過的設定。
+/// 3. 需要強制收尾時，只針對「由 Application.HWND 反查出來、確定是我們啟動的」那個 PID，
+///    不做程序名稱掃描。
 /// </summary>
 [SupportedOSPlatform("windows")]
 public sealed class PowerPointConverter : ISlideConverter
 {
     private const string ProgId = "PowerPoint.Application";
-    private const string ProcessName = "POWERPNT";
-
-    // MsoTriState
-    private const int MsoTrue = -1;
-    private const int MsoFalse = 0;
-
-    // ppAlertLevel
-    private const int PpAlertsNone = 1;
 
     private readonly IAppLogger _logger;
     private bool? _available;
@@ -37,7 +33,6 @@ public sealed class PowerPointConverter : ISlideConverter
     public string DisplayName => "Microsoft PowerPoint";
     public string? UnavailableReason { get; private set; }
 
-    /// <summary>清除偵測快取，讓使用者安裝 Office 之後不必重開程式。</summary>
     public void ResetAvailability()
     {
         _available = null;
@@ -72,44 +67,64 @@ public sealed class PowerPointConverter : ISlideConverter
         if (!OperatingSystem.IsWindows())
             throw new ConversionException("PowerPoint 轉換只能在 Windows 上使用。");
 
-        // 先確認 PowerPoint 是不是已經在執行 —— 這決定我們最後能不能關閉它。
         var policy = new PowerPointSessionPolicy(IsPowerPointRunning());
         _logger.Info("PowerPoint 工作階段：" + policy.Describe());
 
-        var guard = policy.MayKillLeftoverProcesses ? ProcessGuard.Snapshot(ProcessName, _logger) : null;
+        var guard = new OwnedProcessGuard(_logger);
 
         ComObject? app = null;
         ComObject? presentations = null;
         ComObject? presentation = null;
+        OfficeSettingsGuard? settings = null;
         var weOpenedPresentation = false;
-        int? originalAlertLevel = null;
 
         try
         {
             app = ComObject.TryCreate(ProgId)
                   ?? throw new ConversionException("無法啟動 PowerPoint，請確認 Office 安裝是否正常。");
 
-            // 借用使用者的執行個體時，先記住原本的設定以便還原
-            if (policy.MustRestoreApplicationSettings)
-                originalAlertLevel = app.GetOrDefault<int>("DisplayAlerts", 0) is var lvl && lvl != 0 ? lvl : null;
+            var comApp = app;
+            settings = new OfficeSettingsGuard(
+                read: name => comApp.TryGetInt(name),
+                write: (name, value) => comApp.TrySet(name, value),
+                logger: _logger);
 
-            app.TrySet("DisplayAlerts", PpAlertsNone);
+            // 這一行必須在開啟任何外部簡報「之前」執行。
+            // Office 自動化的巨集安全性預設是 msoAutomationSecurityLow（直接執行巨集），
+            // 使用者拖進來的 .ppt / .pps 可能夾帶巨集。
+            if (!settings.Apply(AutomationSecurity, AutomationSecurityForceDisable))
+                _logger.Warn("無法設定 AutomationSecurity，這個版本的 PowerPoint 可能不支援；巨集停用無法保證。");
+
+            settings.Apply(DisplayAlerts, AlertsNone);
+
+            // 只登記由我們啟動的執行個體，作為 Quit 失敗時的最後手段
+            if (policy.MayKillLeftoverProcesses)
+            {
+                var pid = TryGetProcessId(app);
+                if (pid is { } value)
+                {
+                    guard.Track(value);
+                    _logger.Info($"本程式啟動的 PowerPoint PID = {value}。");
+                }
+                else
+                {
+                    _logger.Warn("無法取得 PowerPoint 的 PID，結束時只會呼叫 Quit()，不做強制關閉。");
+                }
+            }
 
             presentations = app.GetObject("Presentations");
 
             var fullPath = Path.GetFullPath(request.SourcePath);
-
-            // 使用者可能正開著這個檔案。若是，直接沿用，結束時絕不關閉它。
             presentation = FindAlreadyOpen(presentations, fullPath);
 
             if (presentation is null)
             {
                 presentation = presentations.CallObject(
                     "Open",
-                    fullPath,     // FileName
-                    MsoTrue,      // ReadOnly
-                    MsoFalse,     // Untitled
-                    MsoFalse);    // WithWindow
+                    fullPath,   // FileName
+                    MsoTrue,    // ReadOnly
+                    MsoFalse,   // Untitled
+                    MsoFalse);  // WithWindow
                 weOpenedPresentation = true;
             }
             else
@@ -120,8 +135,7 @@ public sealed class PowerPointConverter : ISlideConverter
             using var slides = presentation.GetObject("Slides");
             var totalSlides = slides.Get<int>("Count");
 
-            if (totalSlides <= 0)
-                throw new ConversionException("這份簡報沒有任何投影片。");
+            if (totalSlides <= 0) throw new ConversionException("這份簡報沒有任何投影片。");
 
             var pages = request.Pages.Resolve(totalSlides);
             if (pages.Count == 0)
@@ -150,22 +164,15 @@ public sealed class PowerPointConverter : ISlideConverter
                 ExportSlide(slide, target, width, height);
                 written.Add(target);
 
-                // 注意：計數必須獨立一行。寫成 progress?.Report(new SlideProgress(++done, ...))
-                // 時，progress 為 null 會讓整個引數不被求值，++done 永遠不會執行。
+                // 計數必須獨立一行：progress 為 null 時，?. 會讓整個引數不被求值。
                 done++;
                 progress?.Report(new SlideProgress(done, pages.Count));
             }
 
             return written;
         }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (ConversionException)
-        {
-            throw;
-        }
+        catch (OperationCanceledException) { throw; }
+        catch (ConversionException) { throw; }
         catch (ComInvocationException com)
         {
             _logger.Error($"PowerPoint COM 呼叫失敗，成員：{com.MemberName}", com);
@@ -181,17 +188,15 @@ public sealed class PowerPointConverter : ISlideConverter
         }
         finally
         {
-            // 只關閉我們自己開的簡報
             if (presentation is not null && policy.MayClosePresentation(weOpenedPresentation))
                 SafeClose(presentation);
-
-            // 借用時還原被我們改掉的設定
-            if (app is not null && originalAlertLevel is { } level) app.TrySet("DisplayAlerts", level);
 
             presentation?.Dispose();
             presentations?.Dispose();
 
-            // 關鍵：只結束我們自己啟動的 PowerPoint
+            // 還原 AutomationSecurity 與 DisplayAlerts。借用使用者的執行個體時這是必要的。
+            settings?.Dispose();
+
             if (app is not null && policy.MayQuitApplication) SafeQuit(app);
             else if (app is not null) _logger.Info("PowerPoint 由使用者開啟，保持原狀不關閉。");
 
@@ -200,7 +205,8 @@ public sealed class PowerPointConverter : ISlideConverter
             GC.Collect();
             GC.WaitForPendingFinalizers();
 
-            guard?.KillSurvivors(TimeSpan.FromSeconds(8));
+            // 只會動到上面明確登記的 PID
+            guard.KillSurvivors(TimeSpan.FromSeconds(8));
         }
     }
 
@@ -208,17 +214,37 @@ public sealed class PowerPointConverter : ISlideConverter
     {
         try
         {
-            foreach (var p in Process.GetProcessesByName(ProcessName)) { p.Dispose(); return true; }
+            foreach (var p in Process.GetProcessesByName("POWERPNT")) { p.Dispose(); return true; }
             return false;
         }
         catch
         {
-            // 查不到時採取保守做法：當作使用者已開啟，寧可不關也不要誤關
+            // 查不到時保守處理：當作使用者已開啟，寧可不關也不要誤關
             return true;
         }
     }
 
-    /// <summary>在已開啟的簡報中尋找相同檔案；找不到回傳 null。</summary>
+    /// <summary>由 Application.HWND 反查實際的程序 ID。</summary>
+    private int? TryGetProcessId(ComObject app)
+    {
+        try
+        {
+            var hwnd = app.TryGetInt("HWND");
+            if (hwnd is not { } handle || handle == 0) return null;
+
+            _ = GetWindowThreadProcessId(new IntPtr(handle), out var pid);
+            return pid == 0 ? null : (int)pid;
+        }
+        catch (Exception ex)
+        {
+            _logger.Warn("取得 PowerPoint PID 失敗：" + ex.Message);
+            return null;
+        }
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
     private ComObject? FindAlreadyOpen(ComObject presentations, string fullPath)
     {
         try
@@ -236,10 +262,7 @@ public sealed class PowerPointConverter : ISlideConverter
                         return candidate;
                     }
                 }
-                catch
-                {
-                    // 個別簡報查詢失敗就跳過
-                }
+                catch { }
                 candidate.Dispose();
             }
         }
@@ -251,14 +274,9 @@ public sealed class PowerPointConverter : ISlideConverter
         return null;
     }
 
-    /// <summary>
-    /// PowerPoint 的 Export 對超長路徑支援不佳，因此路徑過長時先輸出到短暫存路徑再搬移。
-    /// </summary>
     private static void ExportSlide(ComObject slide, string targetPath, int width, int height)
     {
-        var needsStaging = LongPath.IsLong(targetPath);
-
-        if (!needsStaging)
+        if (!LongPath.IsLong(targetPath))
         {
             slide.Call("Export", targetPath, "PNG", width, height);
             if (!File.Exists(targetPath))
@@ -284,7 +302,6 @@ public sealed class PowerPointConverter : ISlideConverter
         }
     }
 
-    /// <summary>依簡報版面比例算出輸出高度，維持原始長寬比。</summary>
     private static (int Width, int Height) ResolveSize(ComObject presentation, int requestedWidth)
     {
         var width = ExportOptions.ClampWidth(requestedWidth);
@@ -297,10 +314,7 @@ public sealed class PowerPointConverter : ISlideConverter
             var slideHeight = pageSetup.Get<double>("SlideHeight");
             if (slideWidth > 0 && slideHeight > 0) ratio = slideHeight / slideWidth;
         }
-        catch
-        {
-            // 取不到版面設定時退回 16:9
-        }
+        catch { }
 
         var height = (int)Math.Round(width * ratio, MidpointRounding.AwayFromZero);
         return (width, Math.Max(1, height));

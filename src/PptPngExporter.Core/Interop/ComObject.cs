@@ -75,6 +75,13 @@ public sealed class ComObject : IDisposable
             ?? throw new InvalidOperationException($"COM 成員 {memberName} 回傳 null。"),
             typeof(T), CultureInfo.InvariantCulture);
 
+    /// <summary>取得整數屬性；取不到時回傳 null 而不擲出例外。</summary>
+    public int? TryGetInt(string memberName)
+    {
+        try { return Get<int>(memberName); }
+        catch { return null; }
+    }
+
     /// <summary>取得屬性值；取不到時回傳 fallback 而不擲出例外。</summary>
     public T GetOrDefault<T>(string memberName, T fallback)
     {

@@ -16,8 +16,6 @@ namespace PptPngExporter.Core.Converters;
 /// </summary>
 public sealed class LibreOfficeConverter : ISlideConverter
 {
-    private const string ProcessName = "soffice";
-
     private readonly IAppLogger _logger;
     private readonly TimeSpan _timeout;
     private bool? _available;
@@ -65,26 +63,28 @@ public sealed class LibreOfficeConverter : ISlideConverter
         Directory.CreateDirectory(profileDir);
         Directory.CreateDirectory(pdfDir);
 
-        // soffice.exe 會再啟動 soffice.bin，兩者都要看管
-        var guards = new[]
-        {
-            ProcessGuard.Snapshot(ProcessName, _logger),
-            ProcessGuard.Snapshot(ProcessName + ".bin", _logger)
-        };
+        // 用 Job Object 綁住我們啟動的 soffice 及其子程序（soffice.bin）。
+        // 這樣不必掃描程序名稱，也就不可能誤殺使用者在轉檔期間自己開啟的 LibreOffice。
+        var job = WindowsJobObject.TryCreate(_logger);
+        var owned = new OwnedProcessGuard(_logger);
 
         try
         {
-            var pdfPath = ConvertToPdf(soffice, request.SourcePath, pdfDir, profileDir, cancellationToken);
+            var pdfPath = ConvertToPdf(soffice, request.SourcePath, pdfDir, profileDir, job, owned, cancellationToken);
             return Rasterize(pdfPath, request, progress, cancellationToken);
         }
         finally
         {
-            foreach (var guard in guards) guard.KillSurvivors(TimeSpan.FromSeconds(6));
+            // 先給登記過的程序一點時間自行結束，再由 Job 做最後保證
+            owned.KillSurvivors(TimeSpan.FromSeconds(6));
+            job?.Dispose();
             TryDeleteDirectory(workDir);
         }
     }
 
-    private string ConvertToPdf(string soffice, string sourcePath, string pdfDir, string profileDir, CancellationToken cancellationToken)
+    private string ConvertToPdf(
+        string soffice, string sourcePath, string pdfDir, string profileDir,
+        WindowsJobObject? job, OwnedProcessGuard owned, CancellationToken cancellationToken)
     {
         var fullSource = Path.GetFullPath(sourcePath);
         if (!File.Exists(LongPath.Extended(fullSource)))
@@ -131,6 +131,10 @@ public sealed class LibreOfficeConverter : ISlideConverter
         {
             throw new ConversionException("無法啟動 LibreOffice：" + ex.Message, ex);
         }
+
+        // 盡快納入管控：之後由這個程序產生的子程序會自動屬於同一個 Job
+        job?.TryAssign(process);
+        owned.Track(process);
 
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();

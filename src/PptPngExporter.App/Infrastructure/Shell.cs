@@ -107,6 +107,15 @@ public sealed class AppSettings
     public int Numbering { get; set; }
     public int NumberDigits { get; set; } = 3;
 
+    /// <summary>是否在啟動時自動檢查更新。</summary>
+    public bool AutoCheckUpdates { get; set; } = true;
+
+    /// <summary>上次檢查更新的時間（UTC）。</summary>
+    public DateTime? LastUpdateCheckUtc { get; set; }
+
+    /// <summary>使用者選擇略過的版本。</summary>
+    public string? SkippedVersion { get; set; }
+
     [JsonIgnore]
     public static string FilePath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),

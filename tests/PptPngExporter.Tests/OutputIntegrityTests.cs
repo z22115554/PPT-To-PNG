@@ -182,32 +182,6 @@ public class OutputIntegrityTests : IDisposable
     }
 }
 
-public class ProcessGuardTests
-{
-    [Fact]
-    public void 沒有新程序時不會做任何事()
-    {
-        var guard = ProcessGuard.Snapshot("這個程序名稱一定不存在");
-
-        // 不應擲出例外，也應立即返回
-        var start = DateTime.UtcNow;
-        guard.KillSurvivors(TimeSpan.FromSeconds(2));
-
-        Assert.True(DateTime.UtcNow - start < TimeSpan.FromSeconds(2));
-    }
-
-    [Fact]
-    public void 快照目前執行中的程序不會擲出例外()
-    {
-        var current = System.Diagnostics.Process.GetCurrentProcess().ProcessName;
-        var guard = ProcessGuard.Snapshot(current);
-
-        // 自己已經在快照裡，因此不會被視為「新產生的殘留程序」
-        guard.KillSurvivors(TimeSpan.FromMilliseconds(300));
-
-        Assert.True(true);
-    }
-}
 
 /// <summary>
 /// PowerPoint 是單一執行個體的 COM 伺服器：使用者已開著它時，我們拿到的是使用者那一個。

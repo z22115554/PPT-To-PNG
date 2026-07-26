@@ -39,11 +39,24 @@ if (-not (& dotnet --list-sdks | Where-Object { $_ -match '^8\.' })) {
 }
 $project  = Join-Path $repoRoot 'src\PptPngExporter.App\PptPngExporter.App.csproj'
 $stageDir = Join-Path $repoRoot "artifacts\portable-$Runtime"
-$zipPath  = Join-Path $repoRoot "artifacts\PPT-PNG-匯出工具-免安裝版-$Runtime.zip"
+
+# 版本號的唯一來源是 Directory.Build.props
+$appVersion = '0.0.0'
+try {
+    $v = ([xml](Get-Content (Join-Path $repoRoot 'Directory.Build.props') -Raw)).Project.PropertyGroup.Version |
+         Where-Object { $_ } | Select-Object -First 1
+    if ($v) { $appVersion = $v }
+} catch { }
+
+# 發行用的檔名必須是純 ASCII：GitHub 上傳 Release 附件時會把非 ASCII 字元
+# 全部換成句點，中文檔名會變成 PPT-PNG-.-.-win-x64.exe，
+# 而自動更新是用 update-manifest.json 裡的 fileName 去比對附件名稱的，
+# 一旦被改名就永遠找不到下載網址。
+$releaseExe = Join-Path $repoRoot "artifacts\PPT-PNG-Exporter-v$appVersion-Portable-$Runtime.exe"
 
 Write-Host "==> 清理舊的輸出" -ForegroundColor Cyan
-if (Test-Path $stageDir) { Remove-Item $stageDir -Recurse -Force }
-if (Test-Path $zipPath)  { Remove-Item $zipPath -Force }
+if (Test-Path $stageDir)   { Remove-Item $stageDir -Recurse -Force }
+if (Test-Path $releaseExe) { Remove-Item $releaseExe -Force }
 New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
 
 Write-Host "==> 執行測試" -ForegroundColor Cyan
@@ -73,24 +86,24 @@ if ($LASTEXITCODE -ne 0) { Write-Host '發佈失敗。' -ForegroundColor Red; ex
 # 原生相依套件可能仍會帶入 .pdb，這裡一併移除
 Get-ChildItem $stageDir -Filter *.pdb -Recurse | Remove-Item -Force -ErrorAction SilentlyContinue
 
-Write-Host "==> 加入使用說明" -ForegroundColor Cyan
-Copy-Item (Join-Path $repoRoot 'README.md') (Join-Path $stageDir 'README.md') -Force
-@'
-PPT PNG 匯出工具（免安裝版）
+if (-not $SingleFile) {
+    Write-Host ''
+    Write-Host "已輸出資料夾版：$stageDir" -ForegroundColor Green
+    Write-Host '資料夾版不會產生發行用的單一檔案，請直接壓縮整個資料夾自行散布。' -ForegroundColor Yellow
+    return
+}
 
-使用方式
-  1. 把整個資料夾解壓縮到任何位置（例如桌面）。
-  2. 雙擊「PPT PNG 匯出工具.exe」即可使用。
+Write-Host "==> 取出發行用的單一執行檔" -ForegroundColor Cyan
 
-不需要安裝 .NET，也不需要系統管理員權限。
-沒有安裝 PowerPoint 的電腦請另外安裝 LibreOffice：https://zh-tw.libreoffice.org/
-詳細說明請看 README.md。
-'@ | Set-Content -Path (Join-Path $stageDir '請先看我.txt') -Encoding UTF8
+# 單一檔案發佈仍會在輸出資料夾放一份 update.config.json（CopyToOutputDirectory），
+# 這裡只取 .exe。使用者手上沒有設定檔時，程式會用編譯進去的預設 GitHub 儲存庫。
+$built = Get-ChildItem $stageDir -Filter *.exe |
+         Sort-Object Length -Descending | Select-Object -First 1
+if (-not $built) { Write-Host '找不到發佈出來的 .exe。' -ForegroundColor Red; exit 1 }
 
-Write-Host "==> 壓縮成 ZIP" -ForegroundColor Cyan
-Compress-Archive -Path (Join-Path $stageDir '*') -DestinationPath $zipPath -CompressionLevel Optimal
+Copy-Item $built.FullName $releaseExe -Force
 
-$sizeMb = [math]::Round((Get-Item $zipPath).Length / 1MB, 1)
+$sizeMb = [math]::Round((Get-Item $releaseExe).Length / 1MB, 1)
 Write-Host ''
-Write-Host "完成：$zipPath（$sizeMb MB）" -ForegroundColor Green
-Write-Host "解壓縮後執行資料夾：$stageDir" -ForegroundColor Green
+Write-Host "完成：$releaseExe（$sizeMb MB）" -ForegroundColor Green
+Write-Host '免安裝版就是這一個檔案，下載後直接執行，不需要解壓縮。' -ForegroundColor Green

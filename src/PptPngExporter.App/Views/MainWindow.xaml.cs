@@ -33,17 +33,17 @@ public partial class MainWindow : Window
     private void OnWindowDragOver(object sender, DragEventArgs e)
     {
         var hasFiles = e.Data.GetDataPresent(DataFormats.FileDrop);
-        e.Effects = hasFiles && !ViewModel.IsBusy ? DragDropEffects.Copy : DragDropEffects.None;
+        e.Effects = hasFiles && ViewModel.IsIdle ? DragDropEffects.Copy : DragDropEffects.None;
         e.Handled = true;
     }
 
     private void OnWindowDrop(object sender, DragEventArgs e)
     {
-        if (ViewModel.IsBusy) return;
+        if (ViewModel.IsBusy || ViewModel.IsScanning) return;
         if (!e.Data.GetDataPresent(DataFormats.FileDrop)) return;
         if (e.Data.GetData(DataFormats.FileDrop) is not string[] paths) return;
 
-        ViewModel.AddPaths(paths);
+        _ = ViewModel.AddPathsAsync(paths);
         e.Handled = true;
     }
 
